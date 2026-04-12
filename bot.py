@@ -1,6 +1,6 @@
 """
 Trakos — Telegram expense tracker that logs to Google Sheets.
-v3: Comma-separated input, fixed sheet formulas, cleaner date parsing.
+v4: Fixed date handling, math expressions (34+912+509), cleanup command.
 """
 
 import os
@@ -55,7 +55,6 @@ def get_month_sheet(sh, target_date: datetime):
 
     ws = sh.add_worksheet(title=month_name, rows=200, cols=9)
 
-    # Header
     ws.update("A1:G1", [HEADER_ROW])
     ws.format("A1:G1", {
         "textFormat": {"bold": True, "fontSize": 10},
@@ -63,7 +62,6 @@ def get_month_sheet(sh, target_date: datetime):
         "horizontalAlignment": "CENTER",
     })
 
-    # Summary — use update with raw=False so formulas execute
     ws.update("H1", [["SUMMARY"]], raw=False)
     ws.update("H2", [[month_name]], raw=False)
     ws.update("H3", [["Total Spent:"]], raw=False)
@@ -71,7 +69,6 @@ def get_month_sheet(sh, target_date: datetime):
     ws.update("H4", [["Entries:"]], raw=False)
     ws.update("I4", [['=COUNTA(A2:A)']], raw=False)
 
-    # Category breakdown
     categories = list(CATEGORIES.keys()) + ["Other"]
     ws.update("H6", [["BY CATEGORY"]], raw=False)
     for i, cat in enumerate(categories):
@@ -79,7 +76,6 @@ def get_month_sheet(sh, target_date: datetime):
         ws.update(f"H{r}", [[cat]], raw=False)
         ws.update(f"I{r}", [[f'=SUMPRODUCT((E$2:E=H{r})*C$2:C)']], raw=False)
 
-    # Formatting
     ws.format("H1:H2", {"textFormat": {"bold": True}})
     ws.format("H3:H4", {"textFormat": {"bold": True}})
     ws.format("H6", {"textFormat": {"bold": True}})
@@ -91,17 +87,15 @@ def get_month_sheet(sh, target_date: datetime):
 # ─── Date Parser ─────────────────────────────────────────
 MONTH_MAP = {
     "jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
-    "apr":4,"april":4,"may":5,"jun":6,"june":6,
+    "apr":4,"april":4,"apirl":4,  # common typo
+    "may":5,"jun":6,"june":6,
     "jul":7,"july":7,"aug":8,"august":8,"sep":9,"september":9,
     "oct":10,"october":10,"nov":11,"november":11,"dec":12,"december":12,
 }
 
 def parse_date_part(text: str):
-    """
-    Parse a date from a standalone segment (after comma splitting).
-    Returns datetime or None.
-    """
-    s = text.strip().lower()
+    """Parse a date from a standalone segment (after comma splitting)."""
+    s = text.strip().lower().rstrip(".")
     now = datetime.now(TIMEZONE)
 
     if s == "yesterday":
@@ -109,76 +103,126 @@ def parse_date_part(text: str):
     if s == "today":
         return now
 
-    # "18th of April" / "18 of april"
+    # "18th of April"
     m = re.match(r"^(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(\w+)$", s)
     if m:
         day, month_str = int(m.group(1)), m.group(2)
         if month_str in MONTH_MAP and 1 <= day <= 31:
-            try:
-                return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
-    # "18th April 2026" / "18 April 2026"
+    # "18th April 2026"
     m = re.match(r"^(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)\s+(\d{4})$", s)
     if m:
         day, month_str, year = int(m.group(1)), m.group(2), int(m.group(3))
         if month_str in MONTH_MAP and 1 <= day <= 31:
-            try:
-                return datetime(year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
-    # "18th April" / "18 april" / "18th apr"
+    # "18th April" / "18 april" / "18th march"
     m = re.match(r"^(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)$", s)
     if m:
         day, month_str = int(m.group(1)), m.group(2)
         if month_str in MONTH_MAP and 1 <= day <= 31:
-            try:
-                return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
-    # "April 18th" / "april 18"
+    # "April 18th"
     m = re.match(r"^(?:on\s+)?(\w+)\s+(\d{1,2})(?:st|nd|rd|th)?$", s)
     if m:
         month_str, day = m.group(1), int(m.group(2))
         if month_str in MONTH_MAP and 1 <= day <= 31:
-            try:
-                return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
-    # "18/04/2026" or "18-04-2026"
+    # "24th march." (with trailing period)
+    m = re.match(r"^(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)\.?$", s)
+    if m:
+        day, month_str = int(m.group(1)), m.group(2).rstrip(".")
+        if month_str in MONTH_MAP and 1 <= day <= 31:
+            try: return datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+            except ValueError: pass
+
+    # DD/MM/YYYY
     m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$", s)
     if m:
         day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return datetime(year, month, day, tzinfo=TIMEZONE)
-        except ValueError:
-            pass
+        try: return datetime(year, month, day, tzinfo=TIMEZONE)
+        except ValueError: pass
 
-    # "18/04" or "18-04"
+    # DD/MM
     m = re.match(r"^(\d{1,2})[/\-](\d{1,2})$", s)
     if m:
         day, month = int(m.group(1)), int(m.group(2))
         if 1 <= month <= 12 and 1 <= day <= 31:
-            try:
-                return datetime(now.year, month, day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(now.year, month, day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
-    # Just "18th" or "18" with ordinal — only if it looks like a day
+    # Just "18th" or "on 18th"
     m = re.match(r"^(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)$", s)
     if m:
         day = int(m.group(1))
         if 1 <= day <= 31:
-            try:
-                return datetime(now.year, now.month, day, tzinfo=TIMEZONE)
-            except ValueError:
-                pass
+            try: return datetime(now.year, now.month, day, tzinfo=TIMEZONE)
+            except ValueError: pass
 
     return None
+
+
+def parse_date_from_text(text: str):
+    """
+    Extract date from free-form text (legacy mode without commas).
+    Returns (date_or_None, cleaned_text).
+    """
+    now = datetime.now(TIMEZONE)
+
+    # "yesterday"
+    m = re.search(r"\byesterday\b", text, re.IGNORECASE)
+    if m:
+        d = now - timedelta(days=1)
+        remaining = text[:m.start()].strip() + " " + text[m.end():].strip()
+        return d, remaining.strip()
+
+    # "today"
+    m = re.search(r"\btoday\b", text, re.IGNORECASE)
+    if m:
+        remaining = text[:m.start()].strip() + " " + text[m.end():].strip()
+        return now, remaining.strip()
+
+    # "on 18th of April" / "18th of April"
+    m = re.search(r"\b(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(\w+)\b", text, re.IGNORECASE)
+    if m:
+        day, month_str = int(m.group(1)), m.group(2).lower()
+        if month_str in MONTH_MAP and 1 <= day <= 31:
+            try:
+                d = datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+                remaining = text[:m.start()].strip() + " " + text[m.end():].strip()
+                return d, remaining.strip()
+            except ValueError: pass
+
+    # "on 18th April" / "18th April" / "18 april"
+    m = re.search(r"\b(?:on\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)\b", text, re.IGNORECASE)
+    if m:
+        day, month_str = int(m.group(1)), m.group(2).lower().rstrip(".")
+        if month_str in MONTH_MAP and 1 <= day <= 31:
+            try:
+                d = datetime(now.year, MONTH_MAP[month_str], day, tzinfo=TIMEZONE)
+                remaining = text[:m.start()].strip() + " " + text[m.end():].strip()
+                return d, remaining.strip()
+            except ValueError: pass
+
+    # "on 18th" (day only, current month)
+    m = re.search(r"\bon\s+(\d{1,2})(?:st|nd|rd|th)?\b", text, re.IGNORECASE)
+    if m:
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            try:
+                d = datetime(now.year, now.month, day, tzinfo=TIMEZONE)
+                remaining = text[:m.start()].strip() + " " + text[m.end():].strip()
+                return d, remaining.strip()
+            except ValueError: pass
+
+    return None, text
 
 
 # ─── Word-to-Number Parser ───────────────────────────────
@@ -202,8 +246,7 @@ def words_to_number(text: str):
             current += WORD_NUMS[t]
             found = True
         elif t in MULTIPLIERS:
-            if current == 0:
-                current = 1
+            if current == 0: current = 1
             if MULTIPLIERS[t] >= 1000:
                 total += current * MULTIPLIERS[t]
                 current = 0
@@ -215,9 +258,29 @@ def words_to_number(text: str):
 
 
 def parse_amount_str(raw: str):
-    """Parse amount from a string. Returns float or None."""
+    """Parse amount from string. Handles math expressions like 34+912+509."""
     s = raw.strip()
-    # Numeric with suffix
+
+    # Check for math expression: 34 + 912 + 509 or 272+272
+    if "+" in s:
+        parts = s.split("+")
+        total = 0
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            val = _parse_single_amount(p)
+            if val is None:
+                return None
+            total += val
+        return total if total > 0 else None
+
+    return _parse_single_amount(s)
+
+
+def _parse_single_amount(s: str):
+    """Parse a single amount value (no + signs)."""
+    s = s.strip()
     m = re.match(r"^([\d,]+\.?\d*)\s*(k|l|lakh|lakhs|cr|crore|crores)?$", s, re.IGNORECASE)
     if m:
         num = float(m.group(1).replace(",", ""))
@@ -226,26 +289,24 @@ def parse_amount_str(raw: str):
         if suf in ("l", "lakh", "lakhs"): return num * 100000
         if suf in ("cr", "crore", "crores"): return num * 10000000
         return num
-    # Plain numeric
     try:
         val = float(s.replace(",", ""))
         if val > 0: return val
     except ValueError:
         pass
-    # Word-based
     return words_to_number(s)
 
 
 # ─── Categories ──────────────────────────────────────────
 CATEGORIES = {
-    "Food": ["chai","tea","coffee","lunch","dinner","breakfast","biryani","rice","chicken","pizza","burger","snack","sweets","zomato","swiggy","restaurant","dhaba","thali","momos","dosa","roti","dal","paneer","egg","milk","bread","grocery","groceries","fruit","juice","water","coke","pepsi","ice cream","cake","noodles","maggi","food","peanut butter"],
+    "Food": ["chai","tea","coffee","lunch","dinner","breakfast","biryani","rice","chicken","pizza","burger","snack","sweets","zomato","swiggy","restaurant","dhaba","thali","momos","dosa","roti","dal","paneer","egg","milk","bread","grocery","groceries","fruit","juice","water","coke","pepsi","ice cream","cake","noodles","maggi","food","peanut butter","wefit"],
     "Transport": ["uber","ola","auto","rickshaw","cab","taxi","fuel","petrol","diesel","metro","bus","train","flight","parking","toll","rapido"],
-    "Shopping": ["amazon","flipkart","myntra","ajio","clothing","shoes","electronics","phone","headphones","mouse","keyboard","monitor","shirt","jeans","watch","meesho"],
-    "Subscriptions": ["netflix","spotify","youtube","premium","hotstar","adobe","figma","notion","chatgpt","claude","anthropic","gym membership","vpn","icloud","google one","canva","cursor","subscription"],
-    "Business": ["client","freelance","outsource","contractor","equipment","mic","camera","light","render","hosting","domain","catalystx","fiverr","upwork","document print","printing"],
+    "Shopping": ["amazon","flipkart","myntra","ajio","clothing","shoes","electronics","phone","headphones","mouse","keyboard","monitor","shirt","jeans","watch","meesho","nothing phone"],
+    "Subscriptions": ["netflix","spotify","youtube","premium","hotstar","adobe","figma","notion","chatgpt","claude","anthropic","gym membership","vpn","icloud","google one","canva","cursor","subscription","x.com"],
+    "Business": ["client","freelance","outsource","contractor","equipment","mic","camera","light","render","hosting","domain","catalystx","fiverr","upwork","document print","printing","induction"],
     "Health": ["gym","supplement","protein","vitamin","medicine","doctor","hospital","pharmacy","medical","dental","eye","test","lab","scan","whey"],
     "Financial Investment": ["sip","etf","niftybees","juniorbees","goldbees","silverbees","mutual fund","groww","zerodha","stock","share","bond","fd","fixed deposit","ppf","nps","parag parikh","quant small cap","sbi small cap","investment"],
-    "Business Investment": ["course","book","udemy","skillshare","masterclass","workshop","seminar","conference","coaching","mentorship","learning"],
+    "Business Investment": ["course","book","udemy","skillshare","masterclass","workshop","seminar","conference","coaching","mentorship","learning","standing desk","english gpt","cable"],
     "Bills & Utilities": ["electricity","electric","phone bill","recharge","wifi","internet","broadband","jio","airtel","vi","water bill","gas","rent","emi","insurance"],
 }
 
@@ -275,7 +336,7 @@ def guess_payment(text: str) -> str:
 
 
 def to_title_case(text: str) -> str:
-    acronyms = {"sip","etf","upi","emi","nps","ppf","fd","vpn","neft","imps","rtgs","x.com","hdfc","cbi"}
+    acronyms = {"sip","etf","upi","emi","nps","ppf","fd","vpn","neft","imps","rtgs","x.com","hdfc","cbi","gpt"}
     words = text.split()
     result = []
     for w in words:
@@ -286,46 +347,39 @@ def to_title_case(text: str) -> str:
     return " ".join(result)
 
 
+def clean_description(text: str) -> str:
+    """Clean up description: remove leading 'on', trailing junk."""
+    s = text.strip()
+    # Remove leading "on " if it's not part of the description
+    s = re.sub(r"^on\s+", "", s, flags=re.IGNORECASE)
+    # Remove trailing periods, commas
+    s = s.strip(".,;: ")
+    return s
+
+
 # ─── Smart Comma Splitter ────────────────────────────────
 def smart_split(text: str) -> list[str]:
-    """
-    Split by commas, but NOT commas inside numbers (e.g. 3,000).
-    "411, peanut butter, 9th april" -> ["411", "peanut butter", "9th april"]
-    "3,000 chai" -> ["3,000 chai"]  (comma inside number, no split)
-    """
-    # Replace number-internal commas with a placeholder
+    """Split by commas, but NOT commas inside numbers (e.g. 3,000)."""
     protected = re.sub(r"(\d),(\d)", r"\1§\2", text)
-    # Split by comma
     parts = [p.strip() for p in protected.split(",") if p.strip()]
-    # Restore commas in numbers
     parts = [p.replace("§", ",") for p in parts]
     return parts
 
 
 # ─── Input Parser ────────────────────────────────────────
 def parse_input(raw: str):
-    """
-    Parse user input. Supports two modes:
-
-    Mode 1 (comma-separated): "411, peanut butter, 9th april"
-       - segments can be in any order
-       - one segment = amount, one = description, one = date (optional)
-
-    Mode 2 (no commas, legacy): "450 chai" / "fifteen thousand rent"
-       - amount + description as before
-    """
     text = raw.strip()
     if not text:
         return None
 
-    # Extract payment method if "via X" is present (before splitting)
+    # Extract payment method
     payment = "UPI"
     via_match = re.search(r"\b(?:via|using|through|by)\s+(.+)$", text, re.IGNORECASE)
     if via_match:
         payment = guess_payment(via_match.group(1))
         text = text[:via_match.start()].strip()
 
-    # Check if comma-separated (has commas that aren't inside numbers)
+    # Check if comma-separated
     has_separator = bool(re.search(r",(?!\d)", text))
 
     if has_separator:
@@ -335,7 +389,6 @@ def parse_input(raw: str):
 
 
 def _parse_comma_mode(text: str, payment: str):
-    """Parse comma-separated input. Segments in any order."""
     parts = smart_split(text)
 
     amount = None
@@ -343,7 +396,7 @@ def _parse_comma_mode(text: str, payment: str):
     date = None
 
     for part in parts:
-        # Try as amount
+        # Try as amount first
         if amount is None:
             amt = parse_amount_str(part)
             if amt:
@@ -360,61 +413,89 @@ def _parse_comma_mode(text: str, payment: str):
         # Must be description
         if description is None:
             description = part
+        else:
+            # Append additional description parts
+            description = description + " " + part
 
     if amount is None:
         return None
 
-    description = to_title_case(description or "Unnamed")
-    category = guess_category(description)
+    desc = clean_description(description or "Unnamed")
+    desc = to_title_case(desc)
+    category = guess_category(desc)
 
-    return {"amount": amount, "description": description, "category": category, "payment": payment, "date": date}
+    return {"amount": amount, "description": desc, "category": category, "payment": payment, "date": date}
 
 
 def _parse_legacy_mode(text: str, payment: str):
-    """Parse non-comma input (legacy mode): "450 chai", "fifteen thousand rent"."""
+    # First extract date from text
+    custom_date, text = parse_date_from_text(text)
+    text = text.strip()
+    if not text:
+        return None
+
+    # Clean "on " prefix that might remain
+    text = re.sub(r"^on\s+", "", text, flags=re.IGNORECASE).strip()
+
+    # Check for math expression in the amount part
+    # Leading: "272 + 272 wefit" or "34+912+509 lunch"
+    m = re.match(r"^([\d,.\s+]+(?:k|l|lakh|lakhs|cr|crore|crores)?)\s+(.+)", text, re.IGNORECASE)
+    if m:
+        amt_str = m.group(1).strip()
+        # Only treat as math if there's a + sign
+        if "+" in amt_str or re.match(r"^[\d,]+\.?\d*\s*(?:k|l|lakh|lakhs|cr|crore|crores)?$", amt_str, re.IGNORECASE):
+            amt = parse_amount_str(amt_str)
+            if amt:
+                desc = clean_description(m.group(2).strip())
+                desc = to_title_case(desc)
+                return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
     # Leading number
     m = re.match(r"^([\d,]+\.?\d*\s*(?:k|l|lakh|lakhs|cr|crore|crores)?)\s+(.+)", text, re.IGNORECASE)
     if m:
         amt = parse_amount_str(m.group(1))
         if amt:
-            desc = to_title_case(m.group(2).strip())
-            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": None}
+            desc = clean_description(m.group(2).strip())
+            desc = to_title_case(desc)
+            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
     # Trailing number
     m = re.match(r"(.+?)\s+([\d,]+\.?\d*\s*(?:k|l|lakh|lakhs|cr|crore|crores)?)$", text, re.IGNORECASE)
     if m:
         amt = parse_amount_str(m.group(2))
         if amt:
-            desc = to_title_case(m.group(1).strip())
-            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": None}
+            desc = clean_description(m.group(1).strip())
+            desc = to_title_case(desc)
+            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
-    # Word-numbers at start
+    # Word-numbers
     word_num_pattern = r"((?:(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|lakhs|crore|crores|million|billion|and)\s*)+)"
 
     m = re.match(rf"^{word_num_pattern}\s+(.+)", text, re.IGNORECASE)
     if m:
         amt = words_to_number(m.group(1))
         if amt and amt > 0:
-            desc = to_title_case(m.group(2).strip())
-            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": None}
+            desc = clean_description(m.group(2).strip())
+            desc = to_title_case(desc)
+            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
-    # Word-numbers at end
     m = re.match(rf"(.+?)\s+{word_num_pattern}$", text, re.IGNORECASE)
     if m:
         amt = words_to_number(m.group(2))
         if amt and amt > 0:
-            desc = to_title_case(m.group(1).strip())
-            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": None}
+            desc = clean_description(m.group(1).strip())
+            desc = to_title_case(desc)
+            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
     # Fallback
     m = re.search(r"[\d,]+\.?\d*", text)
     if m:
         amt = parse_amount_str(m.group())
         if amt:
-            desc = text.replace(m.group(), "").strip().strip("-–—: ")
+            desc = text.replace(m.group(), "").strip().strip("-–—:., ")
+            desc = clean_description(desc)
             desc = to_title_case(desc) if desc else "Unnamed"
-            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": None}
+            return {"amount": amt, "description": desc, "category": guess_category(desc), "payment": payment, "date": custom_date}
 
     return None
 
@@ -443,19 +524,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "◉ *Trakos*\n\n"
         "Send me your expenses. I'll log them to your Google Sheet.\n\n"
         "*How to log:*\n"
-        "`450 chai`\n"
+        "`450, chai`\n"
         "`411, peanut butter, 9th april`\n"
         "`fifteen thousand, rent, yesterday`\n"
+        "`272 + 272, wefit`\n"
         "`2.5K, uber, via cash`\n"
         "`3,000 groceries`\n\n"
-        "Use commas to separate amount, description, and date.\n"
-        "Or just type amount + description without commas.\n\n"
+        "Commas separate amount, description, date.\n"
+        "Or skip commas: `450 chai`\n\n"
         "*Commands:*\n"
         "/today — today's expenses\n"
         "/week — this week's summary\n"
         "/month — this month's summary\n"
         "/sheet — link to your sheet\n"
         "/categories — list all categories\n"
+        "/cleanup — fix existing sheet data\n"
         "/help — show this message",
         parse_mode="Markdown",
     )
@@ -469,8 +552,7 @@ async def cmd_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cats = "\n".join(f"• *{cat}*" for cat in CATEGORIES.keys())
     await update.message.reply_text(
         f"*Categories:*\n{cats}\n\n• *Other* (default)\n\n"
-        "Categories are auto-detected. Override with #tag:\n"
-        "`450, chai, #food`",
+        "Auto-detected. Override: `450, chai, #food`",
         parse_mode="Markdown",
     )
 
@@ -496,6 +578,114 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     await _send_summary(update, days=30, label="This Month")
+
+
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-process all entries: fix categories, title case, re-sort into month tabs."""
+    if not is_authorized(update.effective_user.id):
+        return
+
+    await update.message.reply_text("Cleaning up sheet... this may take a moment.")
+
+    try:
+        sh = get_spreadsheet()
+
+        # Collect all entries from all worksheets
+        all_entries = []
+        for ws in sh.worksheets():
+            try:
+                rows = ws.get_all_values()
+                if not rows:
+                    continue
+                for row in rows[1:]:  # skip header
+                    if len(row) < 3:
+                        continue
+                    try:
+                        # Validate date
+                        datetime.strptime(row[0], "%d/%m/%Y")
+                        # Validate amount
+                        float(str(row[2]).replace(",", ""))
+                        all_entries.append(row)
+                    except (ValueError, IndexError):
+                        continue
+            except Exception:
+                continue
+
+        if not all_entries:
+            await update.message.reply_text("No entries found to clean up.")
+            return
+
+        # Clean each entry
+        cleaned = []
+        for row in all_entries:
+            date_str = row[0]
+            time_str = row[1] if len(row) > 1 else ""
+            amount = float(str(row[2]).replace(",", ""))
+            desc = row[3] if len(row) > 3 else "Unnamed"
+            raw_input = row[6] if len(row) > 6 else ""
+
+            # Clean description
+            desc = clean_description(desc)
+            desc = to_title_case(desc)
+
+            # Re-categorize
+            category = guess_category(desc)
+
+            # Keep original payment method if valid
+            pay = row[5] if len(row) > 5 else "UPI"
+
+            cleaned.append([date_str, time_str, amount, desc, category, pay, raw_input])
+
+        # Group by month
+        month_groups = {}
+        for row in cleaned:
+            try:
+                d = datetime.strptime(row[0], "%d/%m/%Y")
+                key = d.strftime("%B %Y")
+                if key not in month_groups:
+                    month_groups[key] = []
+                month_groups[key].append(row)
+            except ValueError:
+                continue
+
+        # Delete all existing worksheets except Sheet1
+        for ws in sh.worksheets():
+            if ws.title != "Sheet1":
+                try:
+                    sh.del_worksheet(ws)
+                except Exception:
+                    pass
+
+        # Clear Sheet1
+        try:
+            ws1 = sh.sheet1
+            ws1.clear()
+            ws1.update("A1", [["Cleaned. Data moved to monthly tabs."]])
+        except Exception:
+            pass
+
+        # Create fresh month sheets and populate
+        for month_name, rows in sorted(month_groups.items(), key=lambda x: datetime.strptime(x[0], "%B %Y")):
+            d = datetime.strptime(month_name, "%B %Y").replace(tzinfo=TIMEZONE)
+            ws = get_month_sheet(sh, d)
+            for row in rows:
+                ws.append_row(row, value_input_option="USER_ENTERED")
+
+        total_entries = sum(len(v) for v in month_groups.values())
+        months = len(month_groups)
+        await update.message.reply_text(
+            f"✓ Cleanup complete.\n\n"
+            f"  {total_entries} entries across {months} month(s)\n"
+            f"  All descriptions: Title Case\n"
+            f"  All categories: re-detected\n"
+            f"  Monthly tabs: created with summaries",
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        log.error(f"Cleanup error: {e}")
+        await update.message.reply_text(f"Cleanup failed: {str(e)}")
+
 
 async def _send_summary(update: Update, days: int, label: str):
     try:
@@ -571,8 +761,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Couldn't parse that. Try:\n"
             "`450, chai`\n"
             "`411, peanut butter, 9th april`\n"
-            "`fifteen thousand, rent`\n"
-            "`2.5K uber via cash`",
+            "`272 + 272, wefit`\n"
+            "`fifteen thousand, rent`",
             parse_mode="Markdown",
         )
         return
@@ -629,9 +819,10 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("cleanup", cmd_cleanup))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    log.info("Trakos v3 is running.")
+    log.info("Trakos v4 is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
