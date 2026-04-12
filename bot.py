@@ -103,11 +103,15 @@ def get_month_sheet(sh, target_date: datetime):
 
 
 def append_to_data_area(ws, row_data):
-    """Append a row to the next empty row in column A."""
+    """Append a row to the next empty row in column A, then sort by date ascending."""
     col_a = ws.col_values(1)
     next_row = len(col_a) + 1
     cell_range = f"A{next_row}:G{next_row}"
     ws.update(cell_range, [row_data], value_input_option="USER_ENTERED")
+    
+    # Sort data rows by date (column A) ascending
+    if next_row > 2:
+        ws.sort((1, 'asc'), range=f'A2:G{next_row}')
 
 
 # ─── Groq LLM Parser ────────────────────────────────────
@@ -566,6 +570,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/week — this week's summary\n"
         "/month — this month's summary\n"
         "/sheet — link to your sheet\n"
+        "/sort — sort all sheets by date\n"
         "/categories — list all categories\n"
         "/help — show this message",
         parse_mode="Markdown",
@@ -602,6 +607,34 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
     await _send_summary(update, days=30, label="This Month")
+
+
+async def cmd_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sort all monthly sheets by date ascending."""
+    if not is_authorized(update.effective_user.id):
+        return
+
+    try:
+        sh = get_spreadsheet()
+        sorted_count = 0
+
+        for ws in sh.worksheets():
+            try:
+                col_a = ws.col_values(1)
+                data_rows = len(col_a)
+                if data_rows > 2 and col_a[0] == "Date":
+                    ws.sort((1, 'asc'), range=f'A2:G{data_rows}')
+                    sorted_count += 1
+            except Exception:
+                continue
+
+        await update.message.reply_text(
+            f"✓ Sorted {sorted_count} sheet(s) by date.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        log.error(f"Sort error: {e}")
+        await update.message.reply_text("Sort failed. Check connection.")
 
 
 async def _send_summary(update: Update, days: int, label: str):
@@ -788,6 +821,7 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("sort", cmd_sort))
     app.add_handler(CallbackQueryHandler(handle_category_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
