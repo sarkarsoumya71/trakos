@@ -84,6 +84,14 @@ def get_month_sheet(sh, target_date: datetime):
     return ws
 
 
+def append_to_data_area(ws, row_data):
+    """Append a row to the next empty row in column A (ignores summary section in H-I)."""
+    col_a = ws.col_values(1)  # Get all values in column A
+    next_row = len(col_a) + 1
+    cell_range = f"A{next_row}:G{next_row}"
+    ws.update(cell_range, [row_data], value_input_option="USER_ENTERED")
+
+
 # ─── Date Parser ─────────────────────────────────────────
 MONTH_MAP = {
     "jan":1,"january":1,"feb":2,"february":2,"mar":3,"march":3,
@@ -669,7 +677,7 @@ async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             d = datetime.strptime(month_name, "%B %Y").replace(tzinfo=TIMEZONE)
             ws = get_month_sheet(sh, d)
             for row in rows:
-                ws.append_row(row, value_input_option="USER_ENTERED")
+                append_to_data_area(ws, row)
 
         total_entries = sum(len(v) for v in month_groups.values())
         months = len(month_groups)
@@ -786,7 +794,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         sh = get_spreadsheet()
         ws = get_month_sheet(sh, entry_date)
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        append_to_data_area(ws, row)
     except Exception as e:
         log.error(f"Sheet write error: {e}")
         await update.message.reply_text("Failed to write to sheet. Try again.")
