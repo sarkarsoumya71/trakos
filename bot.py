@@ -113,8 +113,9 @@ def append_to_data_area(ws, row_data):
 # ─── Groq LLM Parser ────────────────────────────────────
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-SYSTEM_PROMPT = """You are a financial expense parser. Given a user's message about an expense, extract:
+SYSTEM_PROMPT = """You are a financial expense parser. Given a user's message about expenses, extract each expense as a separate entry.
 
+For EACH expense, extract:
 1. amount: The numeric amount in INR. Handle words ("fifteen thousand" = 15000), suffixes ("2.5K" = 2500, "1.5L" = 150000), math ("272+272" = 544). Required.
 2. description: What the expense was for. Clean it up, Title Case. Required.
 3. date: The date of the expense in DD/MM/YYYY format. If not mentioned, set to null (the system will use today). Handle "yesterday", "18th April", "last Monday", etc. The current year is 2026.
@@ -123,23 +124,18 @@ SYSTEM_PROMPT = """You are a financial expense parser. Given a user's message ab
 
 Today's date is {today}.
 
-Respond ONLY with a JSON object, no markdown, no explanation:
-{{"amount": number, "description": "string", "date": "DD/MM/YYYY" or null, "category": "string" or null, "payment": "string"}}
+ALWAYS respond with a JSON array, even for a single expense. No markdown, no explanation.
+[{{"amount": number, "description": "string", "date": "DD/MM/YYYY" or null, "category": "string" or null, "payment": "string"}}]
 
 Examples:
-- "On 7th April I spent 43 rupees on document printing" -> {{"amount": 43, "description": "Document Printing", "date": "07/04/2026", "category": "Business", "payment": "UPI"}}
-- "peanut butter 411 9th april" -> {{"amount": 411, "description": "Peanut Butter", "date": "09/04/2026", "category": "Food", "payment": "UPI"}}
-- "fifteen thousand rent yesterday" -> {{"amount": 15000, "description": "Rent", "date": "{yesterday}", "category": "Bills & Utilities", "payment": "UPI"}}
-- "272+272 wefit" -> {{"amount": 544, "description": "Wefit", "date": null, "category": "Food", "payment": "UPI"}}
-- "5000 SIP quant small cap" -> {{"amount": 5000, "description": "SIP Quant Small Cap", "date": null, "category": "Financial Investment", "payment": "UPI"}}
-- "3,000 uber via cash" -> {{"amount": 3000, "description": "Uber", "date": null, "category": "Transport", "payment": "CASH"}}
-- "880, Kling, 25th April" -> {{"amount": 880, "description": "Kling", "date": "25/04/2026", "category": "Subscriptions", "payment": "UPI"}}
-- "449, cable, business investment" -> {{"amount": 449, "description": "Cable", "date": null, "category": "Business Investment", "payment": "UPI"}}
-- "standing desk 15994" -> {{"amount": 15994, "description": "Standing Desk", "date": null, "category": "Business Investment", "payment": "UPI"}}"""
+- "On 7th April I spent 43 rupees on document printing" -> [{{"amount": 43, "description": "Document Printing", "date": "07/04/2026", "category": "Business", "payment": "UPI"}}]
+- "880, Kling, 25th April" -> [{{"amount": 880, "description": "Kling", "date": "25/04/2026", "category": "Subscriptions", "payment": "UPI"}}]
+- "450 chai\\n2000 uber\\n500 gym" -> [{{"amount": 450, "description": "Chai", "date": null, "category": "Food", "payment": "UPI"}},{{"amount": 2000, "description": "Uber", "date": null, "category": "Transport", "payment": "UPI"}},{{"amount": 500, "description": "Gym", "date": null, "category": "Health", "payment": "UPI"}}]
+- "today I spent 200 on chai, 1500 on uber, and 3000 on groceries" -> [{{"amount": 200, "description": "Chai", "date": null, "category": "Food", "payment": "UPI"}},{{"amount": 1500, "description": "Uber", "date": null, "category": "Transport", "payment": "UPI"}},{{"amount": 3000, "description": "Groceries", "date": null, "category": "Food", "payment": "UPI"}}]"""
 
 
-async def parse_with_groq(text: str) -> dict | None:
-    """Send text to Groq LLM for intelligent parsing."""
+async def parse_with_groq(text: str) -> list[dict] | None:
+    """Send text to Groq LLM for intelligent parsing. Returns list of entries."""
     if not GROQ_API_KEY:
         return None
 
@@ -150,7 +146,7 @@ async def parse_with_groq(text: str) -> dict | None:
     prompt = SYSTEM_PROMPT.format(today=today, yesterday=yesterday)
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 GROQ_URL,
                 headers={
@@ -163,7 +159,7 @@ async def parse_with_groq(text: str) -> dict | None:
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": text},
                     ],
-                    "max_tokens": 200,
+                    "max_tokens": 1000,
                     "temperature": 0,
                 },
             )
@@ -177,28 +173,41 @@ async def parse_with_groq(text: str) -> dict | None:
 
             parsed = json.loads(content)
 
-            # Validate
-            if not parsed.get("amount") or parsed["amount"] <= 0:
+            # Handle both single object and array responses
+            if isinstance(parsed, dict):
+                parsed = [parsed]
+
+            if not isinstance(parsed, list) or len(parsed) == 0:
                 return None
-            if not parsed.get("description"):
-                return None
 
-            # Validate category
-            if parsed.get("category") and parsed["category"] not in CATEGORY_LIST:
-                parsed["category"] = None
+            # Validate each entry
+            valid_entries = []
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                if not entry.get("amount") or entry["amount"] <= 0:
+                    continue
+                if not entry.get("description"):
+                    continue
 
-            # Validate payment
-            if parsed.get("payment") and parsed["payment"] not in PAYMENT_METHODS:
-                parsed["payment"] = "UPI"
+                # Validate category
+                if entry.get("category") and entry["category"] not in CATEGORY_LIST:
+                    entry["category"] = None
 
-            # Parse date string to datetime
-            if parsed.get("date"):
-                try:
-                    parsed["date"] = datetime.strptime(parsed["date"], "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-                except ValueError:
-                    parsed["date"] = None
+                # Validate payment
+                if entry.get("payment") and entry["payment"] not in PAYMENT_METHODS:
+                    entry["payment"] = "UPI"
 
-            return parsed
+                # Parse date string to datetime
+                if entry.get("date"):
+                    try:
+                        entry["date"] = datetime.strptime(entry["date"], "%d/%m/%Y").replace(tzinfo=TIMEZONE)
+                    except ValueError:
+                        entry["date"] = None
+
+                valid_entries.append(entry)
+
+            return valid_entries if valid_entries else None
 
     except Exception as e:
         log.warning(f"Groq parse failed: {e}")
@@ -509,6 +518,31 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         parse_mode="Markdown",
     )
 
+    # Check if there are more entries in the queue
+    queue = context.user_data.get("pending_queue", [])
+    if queue:
+        next_entry = queue.pop(0)
+        next_entry["raw"] = pending.get("raw", "")
+        context.user_data["pending_entry"] = next_entry
+        context.user_data["pending_queue"] = queue
+
+        entry_date = next_entry.get("date") or now
+        if isinstance(entry_date, str):
+            try:
+                entry_date = datetime.strptime(entry_date, "%d/%m/%Y").replace(tzinfo=TIMEZONE)
+                next_entry["date"] = entry_date
+            except ValueError:
+                entry_date = now
+
+        date_str = f" · {entry_date.strftime('%d %b')}" if next_entry.get("date") else ""
+
+        await query.message.reply_text(
+            f"*{format_inr(next_entry['amount'])}* — {next_entry['description']}{date_str}\n\n"
+            "Pick a category:",
+            parse_mode="Markdown",
+            reply_markup=build_category_keyboard(),
+        )
+
 
 # ─── Bot Handlers ────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -638,14 +672,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             manual_cat = "Other"
         raw = raw[:cat_match.start()].strip().rstrip(",").strip()
 
-    # Try Groq LLM first
-    parsed = await parse_with_groq(raw)
+    # Try Groq LLM first (returns list)
+    entries = await parse_with_groq(raw)
 
     # Fallback to regex if Groq failed
-    if not parsed:
-        parsed = fallback_parse(raw)
+    if not entries:
+        lines = [l.strip() for l in raw.split("\n") if l.strip()]
+        fallback_results = [fallback_parse(l) for l in lines]
+        fallback_results = [r for r in fallback_results if r]
+        entries = fallback_results if fallback_results else None
 
-    if not parsed:
+    if not entries:
         await update.message.reply_text(
             "Couldn't parse that. Try:\n"
             "`450, chai`\n"
@@ -655,70 +692,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Override category if #tag was used
+    # Apply manual category override to all entries
     if manual_cat:
-        parsed["category"] = manual_cat
+        for e in entries:
+            e["category"] = manual_cat
 
-    parsed["raw"] = update.message.text.strip()
+    # Separate entries with and without categories
+    ready = [e for e in entries if e.get("category")]
+    needs_category = [e for e in entries if not e.get("category")]
 
-    # If no category determined, ask user
-    if not parsed.get("category"):
-        context.user_data["pending_entry"] = parsed
+    # Log all ready entries
+    now = datetime.now(TIMEZONE)
+    logged_lines = []
+    raw_text = update.message.text.strip()
 
-        now = datetime.now(TIMEZONE)
-        entry_date = parsed.get("date") or now
+    for entry in ready:
+        entry_date = entry.get("date") or now
         if isinstance(entry_date, str):
             try:
                 entry_date = datetime.strptime(entry_date, "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-                parsed["date"] = entry_date
             except ValueError:
                 entry_date = now
 
-        date_str = f" · {entry_date.strftime('%d %b')}" if parsed.get("date") else ""
+        row = [
+            entry_date.strftime("%d/%m/%Y"),
+            now.strftime("%H:%M"),
+            entry["amount"],
+            entry["description"],
+            entry["category"],
+            entry.get("payment", "UPI"),
+            raw_text,
+        ]
+
+        try:
+            sh = get_spreadsheet()
+            ws = get_month_sheet(sh, entry_date)
+            append_to_data_area(ws, row)
+
+            date_str = f" · {entry_date.strftime('%d %b')}" if entry.get("date") else ""
+            logged_lines.append(
+                f"✓ *{format_inr(entry['amount'])}* — {entry['description']}\n"
+                f"  {entry['category']} · {entry.get('payment', 'UPI')}{date_str}"
+            )
+        except Exception as e:
+            log.error(f"Sheet write error: {e}")
+            logged_lines.append(f"✗ {format_inr(entry['amount'])} — {entry['description']} (write failed)")
+
+    # Send confirmation for logged entries
+    if logged_lines:
+        await update.message.reply_text("\n\n".join(logged_lines), parse_mode="Markdown")
+
+    # Handle entries that need category selection (one at a time)
+    if needs_category:
+        # Store remaining ones in queue
+        entry = needs_category[0]
+        entry["raw"] = raw_text
+        context.user_data["pending_entry"] = entry
+        context.user_data["pending_queue"] = needs_category[1:] if len(needs_category) > 1 else []
+
+        entry_date = entry.get("date") or now
+        if isinstance(entry_date, str):
+            try:
+                entry_date = datetime.strptime(entry_date, "%d/%m/%Y").replace(tzinfo=TIMEZONE)
+                entry["date"] = entry_date
+            except ValueError:
+                entry_date = now
+
+        date_str = f" · {entry_date.strftime('%d %b')}" if entry.get("date") else ""
 
         await update.message.reply_text(
-            f"*{format_inr(parsed['amount'])}* — {parsed['description']}{date_str}\n\n"
+            f"*{format_inr(entry['amount'])}* — {entry['description']}{date_str}\n\n"
             "Pick a category:",
             parse_mode="Markdown",
             reply_markup=build_category_keyboard(),
         )
-        return
-
-    # Log directly
-    now = datetime.now(TIMEZONE)
-    entry_date = parsed.get("date") or now
-    if isinstance(entry_date, str):
-        try:
-            entry_date = datetime.strptime(entry_date, "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-        except ValueError:
-            entry_date = now
-
-    row = [
-        entry_date.strftime("%d/%m/%Y"),
-        now.strftime("%H:%M"),
-        parsed["amount"],
-        parsed["description"],
-        parsed["category"],
-        parsed.get("payment", "UPI"),
-        update.message.text.strip(),
-    ]
-
-    try:
-        sh = get_spreadsheet()
-        ws = get_month_sheet(sh, entry_date)
-        append_to_data_area(ws, row)
-    except Exception as e:
-        log.error(f"Sheet write error: {e}")
-        await update.message.reply_text("Failed to write to sheet. Try again.")
-        return
-
-    date_str = f" · {entry_date.strftime('%d %b')}" if parsed.get("date") else ""
-
-    await update.message.reply_text(
-        f"✓ *{format_inr(parsed['amount'])}* — {parsed['description']}\n"
-        f"  {parsed['category']} · {parsed.get('payment', 'UPI')}{date_str}",
-        parse_mode="Markdown",
-    )
 
 
 # ─── Main ────────────────────────────────────────────────
