@@ -158,7 +158,7 @@ async def parse_with_groq(text: str) -> list[dict] | None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "llama-3.3-70b-versatile",
+                    "model": "openai/gpt-oss-120b",
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": text},
