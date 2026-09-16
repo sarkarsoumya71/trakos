@@ -646,6 +646,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         await update.message.reply_text("Not authorized.")
         return
+    sms_help = ""
+    if os.environ.get("SMS_IMPORT_ENABLED", "0") == "1":
+        sms_help = (
+            "\n\n*SMS backups:*\n"
+            "New spending waits for your approval before entering monthly totals.\n"
+            "/review — review the next transaction\n"
+            "/syncsms — check Drive for new backups now\n"
+            "/smsstatus — import and review status\n"
+            "/smsentry ID — inspect a transaction or possible duplicate\n"
+            "/unparsed — inspect unsupported bank alerts\n"
+            "/retrysms — retry syncing saved decisions\n"
+            "/exportledger — download your SMS ledger"
+        )
     await update.message.reply_text(
         "◉ *Trakos*\n\n"
         "Send me your expenses in any format.\n\n"
@@ -660,12 +673,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "If I can't determine the category, I'll ask you.\n\n"
         "*Commands:*\n"
         "/today — today's expenses\n"
-        "/week — this week's summary\n"
+        "/week — last seven days' summary\n"
         "/month — this month's summary\n"
         "/sheet — link to your sheet\n"
         "/sort — sort all sheets by date\n"
         "/categories — list all categories\n"
-        "/help — show this message",
+        "/cancel — cancel pending manual entries\n"
+        "/help — show this message" + sms_help,
         parse_mode="Markdown",
     )
 
