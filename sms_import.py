@@ -191,6 +191,10 @@ class Ledger:
                     owner INTEGER, bank TEXT, merchant TEXT, category TEXT,
                     PRIMARY KEY(owner, bank, merchant)
                 );
+                CREATE TABLE IF NOT EXISTS automation (
+                    transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id),
+                    owner INTEGER NOT NULL, notified INTEGER NOT NULL DEFAULT 0
+                );
             ''')
             # Apply the accounting rule to unresolved entries only. Previously
             # exported expenses require explicit reconciliation, not a silent rewrite.
@@ -338,6 +342,53 @@ class Ledger:
     def mark_exported(self, tx_id, owner):
         with self.connect() as db:
             db.execute('UPDATE transactions SET exported=1 WHERE id=? AND owner=?', (tx_id, owner))
+
+    def automatic_pending(self, owner):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("""SELECT t.* FROM transactions t
+                LEFT JOIN automation a ON a.transaction_id=t.id
+                WHERE t.owner=? AND t.status='review' AND a.transaction_id IS NULL ORDER BY t.id""", (owner,))]
+
+    def merchant_category(self, owner, bank, merchant):
+        with self.connect() as db:
+            row = db.execute('SELECT category FROM merchant_rules WHERE owner=? AND bank=? AND merchant=?',
+                             (owner, bank, merchant.casefold())).fetchone()
+            return row['category'] if row else None
+
+    def apply_automatic(self, owner, decisions):
+        with self.connect() as db:
+            for decision in decisions:
+                tx_id, action = decision['tx']['id'], decision['action']
+                tx = db.execute("SELECT * FROM transactions WHERE id=? AND owner=? AND status='review'", (tx_id, owner)).fetchone()
+                if not tx or db.execute('SELECT 1 FROM automation WHERE transaction_id=?', (tx_id,)).fetchone():
+                    continue
+                if action not in ('expense', 'exclude', 'duplicate', 'review'):
+                    raise ValueError('Invalid automatic action')
+                if action == 'expense' and (tx['direction'] != 'debit' or tx['kind'] in NON_SPENDING_KINDS or not decision['category']):
+                    raise ValueError('Invalid automatic expense')
+                db.execute('UPDATE transactions SET status=?,category=?,reason=? WHERE id=? AND owner=?',
+                    ('approved' if action == 'expense' else action, decision['category'] or tx['category'], decision['reason'], tx_id, owner))
+                db.execute('INSERT INTO automation(transaction_id,owner) VALUES (?,?)', (tx_id, owner))
+
+    def automatic_notifications(self, owner):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("""SELECT t.* FROM transactions t JOIN automation a ON t.id=a.transaction_id
+                WHERE t.owner=? AND a.owner=? AND a.notified=0 AND (t.status!='approved' OR t.exported=1) ORDER BY t.id""", (owner, owner))]
+
+    def mark_notified(self, owner, ids):
+        with self.connect() as db:
+            db.executemany('UPDATE automation SET notified=1 WHERE transaction_id=? AND owner=?', [(i, owner) for i in ids])
+
+    def recategorize(self, tx_id, owner, category):
+        with self.connect() as db:
+            tx = db.execute("SELECT * FROM transactions WHERE id=? AND owner=? AND status='approved'", (tx_id, owner)).fetchone()
+            if not tx:
+                raise ValueError('Approved expense not found')
+            db.execute('UPDATE transactions SET category=?,reason=? WHERE id=? AND owner=?',
+                       (category, 'Category corrected by you', tx_id, owner))
+            if tx['merchant']:
+                db.execute('INSERT OR REPLACE INTO merchant_rules VALUES (?,?,?,?)',
+                           (owner, tx['bank'], tx['merchant'].casefold(), category))
 
     def stats(self, owner):
         with self.connect() as db:

@@ -9,16 +9,18 @@ Send `450 chai`, `2.5K uber via cash`, or one expense per line. Manual expense m
 ```text
 SMS Backup & Restore XML (Telegram upload or Drive folder)
     -> local bank parser -> SQLite ledger -> duplicate checks
-    -> Telegram review -> SMS Ledger tab + approved monthly expenses
+    -> GPT-OSS merchant categories -> SMS Ledger tab + monthly expenses + Telegram notification
 ```
 
-- Imported SMS never goes to Groq. Known HDFC/CBI sender patterns are parsed locally.
+- Known HDFC/CBI sender patterns and amounts are parsed locally. With automatic categorization enabled, only sanitized merchant names go to Groq. Raw SMS, account numbers, references, balances and amounts are not included in category requests.
 - Personal messages, outgoing SMS, OTPs and obvious failed/requested payments are skipped.
 - Repeated files and identical messages are skipped. Matching bank/account/reference/date/amount/direction alerts share one transaction.
 - Equal amounts alone never auto-merge. Possible duplicates remain separate for review.
-- Review also checks existing monthly entries for equal amounts and dates.
+- Automatic processing checks existing monthly entries and SMS references before booking expenses. An ambiguous match is held aside; equal amounts alone never prove a duplicate.
 - Transfers, card payments, withdrawals, income and refunds can stay in the ledger without entering spending totals.
-- Explicit own-account transfers and credit-card bill payments are retained and automatically excluded from spending. Other parsed transactions start in review; a category choice approves a debit and learns a merchant-category suggestion.
+- Explicit own-account transfers, credit-card bill payments, credits/refunds and withdrawals are retained outside spending. Routine debit expenses are categorized and saved automatically when `SMS_AUTO_APPROVE=1`. Missing/unclear merchants use Other. Confirmed merchant choices override the model; model guesses are never learned as confirmed rules.
+- A Telegram notification follows a successful Sheet sync. A large backlog gets a summary; smaller batches include each expense. Delivery retries after failure, with notification state persisted in SQLite. A crash after Telegram accepts a message but before acknowledgement is saved can repeat a notification, but not an expense.
+- An optional, bounded historical-overlap policy can keep possible duplicates outside totals without requiring review. It never applies to transactions above the configured backlog ID.
 - Unsupported known-bank alerts are inspectable with `/unparsed`.
 
 **SMS import is off by default.** Validate real bank templates before activation. See [setup](SETUP.md) and [upgrade notes](UPGRADE.md).
@@ -34,6 +36,7 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 | `/syncsms` | Import from the configured Drive folder |
 | `/review` | Review the next imported transaction |
 | `/smsentry ID` | Inspect a possible duplicate |
+| `/smscategory ID Category` | Correct a saved expense and learn your merchant choice |
 | `/smsstatus` | Review counts and Drive-check status |
 | `/unparsed` | Show up to five unsupported bank alerts |
 | `/retrysms` | Retry syncing saved decisions to Sheets |
