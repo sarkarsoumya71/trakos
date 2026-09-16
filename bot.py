@@ -151,6 +151,31 @@ def append_to_data_area(ws, row_data):
 
 
 @sheet_locked
+def append_many_to_data_area(ws, rows):
+    """Write a backlog in one batch, with the same literal/date rules as manual entry."""
+    if not rows:
+        return
+    values = ws.col_values(1)
+    if not values or values[0] != 'Date':
+        raise ValueError('Expense sheet header is missing')
+    start = len(values) + 1
+    converted = []
+    for source in rows:
+        row = list(source)
+        row[0] = (datetime.strptime(row[0], '%d/%m/%Y') - datetime(1899, 12, 30)).days
+        converted.append(row)
+    end = start + len(converted) - 1
+    if end > ws.row_count:
+        ws.add_rows(end - ws.row_count + 100)
+    ws.format(f'A{start}:A{end}', {'numberFormat': {'type': 'DATE', 'pattern': 'dd/mm/yyyy'}})
+    ws.update(f'A{start}:G{end}', converted, value_input_option='RAW')
+    try:
+        sort_month_sheet(ws)
+    except Exception as exc:
+        log.warning('Expenses saved; sorting deferred (%s)', type(exc).__name__)
+
+
+@sheet_locked
 def sort_month_sheet(ws):
     """Normalize legacy displayed DD/MM dates only when every date matches its tab."""
     month = datetime.strptime(ws.title, "%B %Y")
@@ -650,11 +675,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if os.environ.get("SMS_IMPORT_ENABLED", "0") == "1":
         sms_help = (
             "\n\n*SMS backups:*\n"
-            "New spending waits for your approval before entering monthly totals.\n"
+            + ("Expenses are categorized and saved automatically. Telegram confirms each sync; /review handles exceptions.\n"
+               if os.environ.get('SMS_AUTO_APPROVE', '0') == '1' else
+               "New spending waits for your approval before entering monthly totals.\n") +
             "/review — review the next transaction\n"
             "/syncsms — check Drive for new backups now\n"
             "/smsstatus — import and review status\n"
             "/smsentry ID — inspect a transaction or possible duplicate\n"
+            "/smscategory ID Category — correct an expense category\n"
             "/unparsed — inspect unsupported bank alerts\n"
             "/retrysms — retry syncing saved decisions\n"
             "/exportledger — download your SMS ledger"
