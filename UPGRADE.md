@@ -30,16 +30,16 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 - 51 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, exclusions and crash/retry recovery.
 - Live Groq smoke test passed with two synthetic expenses; no real bank SMS was sent to Groq.
 - Dependency checks and Python compilation passed locally. CI targets Python 3.12 to match Docker.
-- Read-only Railway inspection found no Volume on the existing Trakos service.
+- Railway now has a persistent Volume mounted at `/data` for the SMS database.
 - Initial development did not deploy code or mutate the production Sheet.
 
-## Before activation
+## Activation completed — 16 September 2026
 
-1. Locate and verify the actual Google Drive backup folder. The supplied local XML has been inspected, but connected Drive searches have not found its cloud source.
-2. Real HDFC/CBI template checks now cover ISO card timestamps, multiline UPI payees, CBI NEFT credits with three decimal places, deductions, POS purchases and successful Autopay notices. Synthetic regression fixtures protect privacy. Verify the final import and review flow in deployment before activation.
+1. The dedicated Google Drive backup folder is configured and the production service account can read its SMS XML. The chat Drive connector does not list these XML files; direct service-account access was verified.
+2. Real HDFC/CBI template checks cover ISO card timestamps, multiline UPI payees, CBI NEFT credits with three decimal places, deductions, POS purchases and successful Autopay notices. Synthetic regression fixtures protect privacy. The first production import and Sheet projection succeeded. Review rendering was checked against a copy of the production database with replies captured locally, without sending Telegram messages or approving real spending.
 3. The accounting policy is confirmed: own-account transfers and credit-card bill payments stay in the ledger and are excluded from spending. Explicitly identified types are excluded automatically; uncertain transactions remain in review, with dedicated buttons to confirm either type. Equal amounts alone never establish account ownership.
-4. Add the persistent Volume, test a small import end to end, then enable Drive polling.
-5. Back up the existing Sheet before legacy date normalization. Historical dates are inferred from displayed DD/MM values and month-tab names; inconsistent rows need review.
+4. Hourly Drive polling is enabled. Restart verification confirmed the database persisted and the repeated import did not duplicate Sheet rows. A private local SQLite snapshot passed its integrity check; it is excluded from Git and Docker builds.
+5. A native copy of the existing expense Sheet was created and verified before deployment. Legacy date normalization runs when a monthly sheet is sorted. Historical dates are inferred from displayed DD/MM values and month-tab names; inconsistent rows need review.
 
 ## Current limits
 
@@ -52,7 +52,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 - Old unsupported imports are not automatically reparsed after parser changes. `/unparsed` shows the first five; dismissal/editing is not implemented.
 - Drive scans direct child files named `sms*.xml`, revisits backups, and uses content fingerprints. Set the exact nested folder ID if needed.
 - Freshness is limited by the phone's backup schedule. Hourly polling cannot make weekly backups current.
-- Volume-loss recovery and live end-to-end behavior remain unverified until the Drive folder and deployment setup are available. Offline import/re-import of the supplied real backup has been verified. Foreign-currency receipts remain unparsed and are never converted into INR by guessing.
+- Automatic import, Sheet projection, restart persistence, and duplicate prevention have been verified in production. Actual Telegram button interaction still needs the owner's first review. A complete restore after Volume loss and recurring database snapshots are not configured. Foreign-currency receipts remain unparsed and are never converted into INR by guessing.
 
 ## Primary sources checked
 
