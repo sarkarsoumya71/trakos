@@ -7,6 +7,12 @@ import os
 import re
 import json
 import logging
+import math
+import sys
+import threading
+import secrets
+from functools import wraps
+from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,11 +20,13 @@ import httpx
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    PicklePersistence,
     filters,
     ContextTypes,
 )
@@ -29,10 +37,21 @@ GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 SHEET_ID = os.environ.get("SHEET_ID", "")
 ALLOWED_USER_IDS = os.environ.get("ALLOWED_USER_IDS", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 TIMEZONE = ZoneInfo("Asia/Kolkata")
+SHEET_LOCK = threading.RLock()
+
+
+def sheet_locked(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with SHEET_LOCK:
+            return function(*args, **kwargs)
+    return wrapped
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("trakos")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ─── Google Sheets ────────────────────────────────────────
 SCOPES = [
@@ -65,6 +84,7 @@ def get_spreadsheet():
     return gc.open_by_key(SHEET_ID)
 
 
+@sheet_locked
 def get_month_sheet(sh, target_date: datetime):
     month_name = target_date.strftime("%B %Y")
     try:
@@ -102,16 +122,60 @@ def get_month_sheet(sh, target_date: datetime):
     return ws
 
 
+@sheet_locked
 def append_to_data_area(ws, row_data):
     """Append a row to the next empty row in column A, then sort by date ascending."""
     col_a = ws.col_values(1)
+    if not col_a or col_a[0] != "Date":
+        raise ValueError("Expense sheet header is missing")
     next_row = len(col_a) + 1
     cell_range = f"A{next_row}:G{next_row}"
-    ws.update(cell_range, [row_data], value_input_option="USER_ENTERED")
+    row_data = list(row_data)
+    date = datetime.strptime(row_data[0], "%d/%m/%Y")
+    row_data[0] = (date - datetime(1899, 12, 30)).days
+    if next_row > ws.row_count:
+        ws.add_rows(max(200, next_row - ws.row_count))
+    # RAW keeps descriptions and SMS bodies literal, even when they start with '='.
+    # Date serials avoid Google Sheets locale-dependent date interpretation.
+    ws.format(f"A{next_row}", {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}})
+    ws.format(cell_range, {"horizontalAlignment": "CENTER"})
+    ws.update(cell_range, [row_data], value_input_option="RAW")
     
     # Sort data rows by date (column A) ascending
     if next_row > 2:
-        ws.sort((1, 'asc'), range=f'A2:G{next_row}')
+        try:
+            sort_month_sheet(ws)
+        except Exception as exc:
+            # A successful append must not be reported as failed if sorting fails.
+            log.warning("Expense saved; sorting deferred (%s)", type(exc).__name__)
+
+
+@sheet_locked
+def sort_month_sheet(ws):
+    """Normalize legacy displayed DD/MM dates only when every date matches its tab."""
+    month = datetime.strptime(ws.title, "%B %Y")
+    values = ws.col_values(1)
+    if not values or values[0] != "Date":
+        return
+    dates = []
+    for value in values[1:]:
+        if not value:
+            dates.append([""])
+            continue
+        parsed = datetime.strptime(value, "%d/%m/%Y")
+        if (parsed.year, parsed.month) != (month.year, month.month):
+            raise ValueError("Date does not match month tab; review before sorting")
+        dates.append([(parsed - datetime(1899, 12, 30)).days])
+    if dates:
+        ws.spreadsheet.batch_update({'requests': [
+            {'updateCells': {'start': {'sheetId': ws.id, 'rowIndex': 1, 'columnIndex': 0},
+                'rows': [{'values': [{'userEnteredValue': {'numberValue': d[0]} if d[0] != '' else {'stringValue': ''},
+                    'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd/mm/yyyy'}}}]} for d in dates],
+                'fields': 'userEnteredValue,userEnteredFormat.numberFormat'}},
+            {'sortRange': {'range': {'sheetId': ws.id, 'startRowIndex': 1,
+                'endRowIndex': len(values), 'startColumnIndex': 0, 'endColumnIndex': 7},
+                'sortSpecs': [{'dimensionIndex': 0, 'sortOrder': 'ASCENDING'}]}}
+        ]})
 
 
 # ─── Groq LLM Parser ────────────────────────────────────
@@ -122,7 +186,7 @@ SYSTEM_PROMPT = """You are a financial expense parser. Given a user's message ab
 For EACH expense, extract:
 1. amount: The numeric amount in INR. Handle words ("fifteen thousand" = 15000), suffixes ("2.5K" = 2500, "1.5L" = 150000), math ("272+272" = 544). Required.
 2. description: What the expense was for. Clean it up, Title Case. Required.
-3. date: The date of the expense in DD/MM/YYYY format. If not mentioned, set to null (the system will use today). Handle "yesterday", "18th April", "last Monday", etc. The current year is 2026.
+3. date: The date of the expense in DD/MM/YYYY format. If not mentioned, set to null (the system will use today). Handle "yesterday", "18th April", "last Monday", etc. Use the year from today's date unless stated otherwise.
 4. category: One of these exact values: Food, Transport, Shopping, Subscriptions, Business, Health, Financial Investment, Business Investment, Bills & Utilities, Other. Pick the best match based on context. If genuinely ambiguous, set to null.
 5. payment: Payment method. One of: UPI, CARD1, CARD2, CASH, BANK. Default to UPI if not mentioned. Look for keywords like "via cash", "using card", "gpay/phonepe/paytm" = UPI.
 
@@ -147,7 +211,7 @@ async def parse_with_groq(text: str) -> list[dict] | None:
     yesterday = (now - timedelta(days=1)).strftime("%d/%m/%Y")
     today = now.strftime("%d/%m/%Y")
 
-    prompt = SYSTEM_PROMPT.format(today=today, yesterday=yesterday)
+    prompt = SYSTEM_PROMPT.replace("2026", str(now.year)).format(today=today, yesterday=yesterday)
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -158,17 +222,19 @@ async def parse_with_groq(text: str) -> list[dict] | None:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "openai/gpt-oss-120b",
+                    "model": GROQ_MODEL,
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": text},
                     ],
-                    "max_tokens": 1000,
+                    "max_tokens": 4096,
                     "temperature": 0,
                 },
             )
             resp.raise_for_status()
             data = resp.json()
+            if data["choices"][0].get("finish_reason") == "length":
+                raise ValueError("Truncated parser response")
             content = data["choices"][0]["message"]["content"].strip()
 
             # Clean markdown fences if present
@@ -188,33 +254,35 @@ async def parse_with_groq(text: str) -> list[dict] | None:
             valid_entries = []
             for entry in parsed:
                 if not isinstance(entry, dict):
-                    continue
-                if not entry.get("amount") or entry["amount"] <= 0:
-                    continue
-                if not entry.get("description"):
-                    continue
+                    raise ValueError("Invalid expense object")
+                amount = entry.get("amount")
+                if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
+                    raise ValueError("Invalid amount")
+                if not isinstance(entry.get("description"), str) or not entry["description"].strip():
+                    raise ValueError("Missing description")
+                entry["description"] = to_title_case(entry["description"].strip())
 
                 # Validate category
                 if entry.get("category") and entry["category"] not in CATEGORY_LIST:
                     entry["category"] = None
 
                 # Validate payment
-                if entry.get("payment") and entry["payment"] not in PAYMENT_METHODS:
+                if entry.get("payment") not in PAYMENT_METHODS:
                     entry["payment"] = "UPI"
 
                 # Parse date string to datetime
                 if entry.get("date"):
                     try:
                         entry["date"] = datetime.strptime(entry["date"], "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-                    except ValueError:
-                        entry["date"] = None
+                    except (ValueError, TypeError):
+                        raise ValueError("Invalid explicit date")
 
                 valid_entries.append(entry)
 
             return valid_entries if valid_entries else None
 
     except Exception as e:
-        log.warning(f"Groq parse failed: {e}")
+        log.warning("Groq parse failed (%s); using fallback", type(e).__name__)
         return None
 
 
@@ -301,10 +369,10 @@ def parse_amount_str(raw: str):
 
 def guess_category_keywords(text: str) -> str | None:
     lower = text.lower()
-    for cat, keywords in CATEGORY_KEYWORDS.items():
-        for kw in keywords:
-            if kw in lower:
-                return cat
+    matches = [(len(kw), cat) for cat, keywords in CATEGORY_KEYWORDS.items()
+               for kw in keywords if re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", lower)]
+    if matches:
+        return max(matches, key=lambda item: item[0])[1]
     return None
 
 def to_title_case(text: str) -> str:
@@ -362,6 +430,18 @@ def fallback_parse(raw: str) -> dict | None:
     """Regex-based fallback parser."""
     text = raw.strip()
     if not text: return None
+
+    # Remove a trailing date before parsing the amount/description.
+    tokens = text.split()
+    for start in range(1, len(tokens)):
+        suffix = " ".join(tokens[start:]).strip(" ,")
+        date = parse_date_part(suffix)
+        if date:
+            prefix = " ".join(tokens[:start]).rstrip(" ,")
+            result = fallback_parse(prefix)
+            if result:
+                result["date"] = date
+                return result
 
     payment = "UPI"
     via_match = re.search(r"\b(?:via|using|through|by)\s+(.+)$", text, re.IGNORECASE)
@@ -450,19 +530,22 @@ def format_inr(n: float) -> str:
 
 def is_authorized(user_id: int) -> bool:
     if not ALLOWED_USER_IDS:
-        return True
-    allowed = [int(x.strip()) for x in ALLOWED_USER_IDS.split(",") if x.strip()]
+        return False
+    try:
+        allowed = [int(x.strip()) for x in ALLOWED_USER_IDS.split(",") if x.strip()]
+    except ValueError:
+        return False
     return user_id in allowed
 
 
 # ─── Category Picker (Inline Keyboard) ───────────────────
-def build_category_keyboard():
+def build_category_keyboard(token):
     """Build inline keyboard with category buttons (2 per row)."""
     buttons = []
     for i in range(0, len(CATEGORY_LIST), 2):
-        row = [InlineKeyboardButton(CATEGORY_LIST[i], callback_data=f"cat:{CATEGORY_LIST[i]}")]
+        row = [InlineKeyboardButton(CATEGORY_LIST[i], callback_data=f"cat:{token}:{i}")]
         if i + 1 < len(CATEGORY_LIST):
-            row.append(InlineKeyboardButton(CATEGORY_LIST[i+1], callback_data=f"cat:{CATEGORY_LIST[i+1]}"))
+            row.append(InlineKeyboardButton(CATEGORY_LIST[i+1], callback_data=f"cat:{token}:{i+1}"))
         buttons.append(row)
     return InlineKeyboardMarkup(buttons)
 
@@ -470,16 +553,25 @@ def build_category_keyboard():
 async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle category selection from inline keyboard."""
     query = update.callback_query
+    if not is_authorized(update.effective_user.id):
+        await query.answer("Not authorized.", show_alert=True)
+        return
     await query.answer()
 
     if not query.data.startswith("cat:"):
         return
 
-    category = query.data[4:]
     pending = context.user_data.get("pending_entry")
-
-    if not pending:
-        await query.edit_message_text("No pending entry found. Try again.")
+    parts = query.data.split(':')
+    if not pending or len(parts) != 3 or parts[1] != pending.get('_picker_token'):
+        await query.edit_message_text("This category picker has expired. Use the latest picker, or /cancel and resend.")
+        return
+    try:
+        index = int(parts[2])
+        if index < 0:
+            return
+        category = CATEGORY_LIST[index]
+    except (ValueError, IndexError):
         return
 
     pending["category"] = category
@@ -508,7 +600,7 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         ws = get_month_sheet(sh, entry_date)
         append_to_data_area(ws, row)
     except Exception as e:
-        log.error(f"Sheet write error: {e}")
+        log.error("Sheet write error (%s)", type(e).__name__)
         await query.edit_message_text("Failed to write to sheet. Try again.")
         return
 
@@ -517,7 +609,7 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
     date_str = f" · {entry_date.strftime('%d %b')}" if pending.get("date") else ""
 
     await query.edit_message_text(
-        f"✓ *{format_inr(pending['amount'])}* — {pending['description']}\n"
+        f"✓ *{format_inr(pending['amount'])}* — {escape_markdown(pending['description'])}\n"
         f"  {pending['category']} · {pending.get('payment', 'UPI')}{date_str}",
         parse_mode="Markdown",
     )
@@ -526,6 +618,7 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
     queue = context.user_data.get("pending_queue", [])
     if queue:
         next_entry = queue.pop(0)
+        next_entry['_picker_token'] = secrets.token_hex(4)
         next_entry["raw"] = pending.get("raw", "")
         context.user_data["pending_entry"] = next_entry
         context.user_data["pending_queue"] = queue
@@ -541,10 +634,10 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         date_str = f" · {entry_date.strftime('%d %b')}" if next_entry.get("date") else ""
 
         await query.message.reply_text(
-            f"*{format_inr(next_entry['amount'])}* — {next_entry['description']}{date_str}\n\n"
+            f"*{format_inr(next_entry['amount'])}* — {escape_markdown(next_entry['description'])}{date_str}\n\n"
             "Pick a category:",
             parse_mode="Markdown",
-            reply_markup=build_category_keyboard(),
+            reply_markup=build_category_keyboard(next_entry['_picker_token']),
         )
 
 
@@ -606,7 +699,7 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
         return
-    await _send_summary(update, days=30, label="This Month")
+    await _send_summary(update, days=-1, label="This Month")
 
 
 async def cmd_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -623,7 +716,7 @@ async def cmd_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 col_a = ws.col_values(1)
                 data_rows = len(col_a)
                 if data_rows > 2 and col_a[0] == "Date":
-                    ws.sort((1, 'asc'), range=f'A2:G{data_rows}')
+                    sort_month_sheet(ws)
                     sorted_count += 1
             except Exception:
                 continue
@@ -641,7 +734,9 @@ async def _send_summary(update: Update, days: int, label: str):
     try:
         sh = get_spreadsheet()
         now = datetime.now(TIMEZONE)
-        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0) if days == 0 else now - timedelta(days=days)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff = today.replace(day=1) if days == -1 else today - timedelta(days=max(0, days - 1))
+        end = today + timedelta(days=1)
 
         total = 0.0
         cat_totals = {}
@@ -649,15 +744,16 @@ async def _send_summary(update: Update, days: int, label: str):
 
         for ws in sh.worksheets():
             try:
+                datetime.strptime(ws.title, "%B %Y")
                 rows = ws.get_all_values()[1:]
-            except Exception:
+            except ValueError:
                 continue
             for row in rows:
                 if len(row) < 3:
                     continue
                 try:
                     row_date = datetime.strptime(row[0], "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-                    if row_date >= cutoff:
+                    if cutoff <= row_date < end:
                         amt = float(str(row[2]).replace(",", ""))
                         total += amt
                         count += 1
@@ -691,6 +787,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     if not raw or raw.startswith("/"):
         return
+    if context.user_data.get("pending_entry"):
+        await update.message.reply_text("Choose the category for your pending expense first, or /cancel it. Then resend this message.")
+        return
 
     # Manual category override via #tag
     manual_cat = None
@@ -698,22 +797,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cat_match:
         tag = cat_match.group(1).lower()
         for cat_name in CATEGORY_LIST:
-            if tag in cat_name.lower().replace(" ", "").replace("&", ""):
+            if tag == cat_name.lower().replace(" ", "").replace("&", ""):
                 manual_cat = cat_name
                 break
         if not manual_cat and tag == "other":
             manual_cat = "Other"
-        raw = raw[:cat_match.start()].strip().rstrip(",").strip()
+        raw = (raw[:cat_match.start()] + raw[cat_match.end():]).strip().strip(",").strip()
 
     # Try Groq LLM first (returns list)
     entries = await parse_with_groq(raw)
 
     # Fallback to regex if Groq failed
     if not entries:
+        await update.message.reply_text("AI parsing is unavailable for this message. Trying the basic parser; check the amount and date in the confirmation.")
         lines = [l.strip() for l in raw.split("\n") if l.strip()]
+        if any(re.search(r"\band\s+(?:₹|rs\.?\s*)?\d", line, re.I) for line in lines):
+            await update.message.reply_text("Please resend each expense on its own line: amount, description, date.")
+            return
         fallback_results = [fallback_parse(l) for l in lines]
-        fallback_results = [r for r in fallback_results if r]
-        entries = fallback_results if fallback_results else None
+        entries = fallback_results if fallback_results and all(fallback_results) else None
 
     if not entries:
         await update.message.reply_text(
@@ -736,6 +838,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Log all ready entries
     now = datetime.now(TIMEZONE)
+    for entry in entries:
+        entry["date"] = entry.get("date") or now
     logged_lines = []
     raw_text = update.message.text.strip()
 
@@ -764,12 +868,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             date_str = f" · {entry_date.strftime('%d %b')}" if entry.get("date") else ""
             logged_lines.append(
-                f"✓ *{format_inr(entry['amount'])}* — {entry['description']}\n"
+                f"✓ *{format_inr(entry['amount'])}* — {escape_markdown(entry['description'])}\n"
                 f"  {entry['category']} · {entry.get('payment', 'UPI')}{date_str}"
             )
         except Exception as e:
-            log.error(f"Sheet write error: {e}")
-            logged_lines.append(f"✗ {format_inr(entry['amount'])} — {entry['description']} (write failed)")
+            log.error("Sheet write error (%s)", type(e).__name__)
+            logged_lines.append(f"✗ {format_inr(entry['amount'])} — {escape_markdown(entry['description'])} (write failed)")
 
     # Send confirmation for logged entries
     if logged_lines:
@@ -777,8 +881,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Handle entries that need category selection (one at a time)
     if needs_category:
+        for pending in needs_category:
+            pending["raw"] = raw_text
         # Store remaining ones in queue
         entry = needs_category[0]
+        entry['_picker_token'] = secrets.token_hex(4)
         entry["raw"] = raw_text
         context.user_data["pending_entry"] = entry
         context.user_data["pending_queue"] = needs_category[1:] if len(needs_category) > 1 else []
@@ -794,14 +901,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = f" · {entry_date.strftime('%d %b')}" if entry.get("date") else ""
 
         await update.message.reply_text(
-            f"*{format_inr(entry['amount'])}* — {entry['description']}{date_str}\n\n"
+            f"*{format_inr(entry['amount'])}* — {escape_markdown(entry['description'])}{date_str}\n\n"
             "Pick a category:",
             parse_mode="Markdown",
-            reply_markup=build_category_keyboard(),
+            reply_markup=build_category_keyboard(entry['_picker_token']),
         )
 
 
 # ─── Main ────────────────────────────────────────────────
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+    context.user_data.pop("pending_entry", None)
+    context.user_data.pop("pending_queue", None)
+    await update.message.reply_text("Pending manual entries cancelled. Already saved expenses are unchanged.")
+
+
+async def handle_error(update, context):
+    log.error("Telegram handler failed (%s)", type(context.error).__name__)
+
+
 def main():
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN not set")
@@ -811,8 +930,18 @@ def main():
         raise ValueError("SHEET_ID not set")
     if not GROQ_API_KEY:
         log.warning("GROQ_API_KEY not set — using regex fallback only")
+    if not ALLOWED_USER_IDS or not all(x.strip().isdigit() for x in ALLOWED_USER_IDS.split(",")):
+        raise ValueError("ALLOWED_USER_IDS must contain your Telegram user ID")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    from sms_workflow import configured
+    sms = configured(sys.modules[__name__])
+    builder = Application.builder().token(TELEGRAM_TOKEN)
+    if sms:
+        builder = builder.post_init(sms.start).post_stop(sms.stop)
+        builder = builder.persistence(PicklePersistence(filepath=str(Path(sms.db.path).with_suffix('.pending.pickle'))))
+    app = builder.build()
+    if sms:
+        sms.register(app)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -822,10 +951,12 @@ def main():
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
     app.add_handler(CommandHandler("sort", cmd_sort))
-    app.add_handler(CallbackQueryHandler(handle_category_callback))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CallbackQueryHandler(handle_category_callback, pattern=r'^cat:'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    log.info("Trakos v5 is running.")
+    app.add_error_handler(handle_error)
+    log.info("Trakos v6 is running. SMS import: %s", bool(sms))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
