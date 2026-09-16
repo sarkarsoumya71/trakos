@@ -129,6 +129,11 @@ class SMSWorkflow:
                     scopes=['https://www.googleapis.com/auth/drive.readonly'])
         reports = []
         with AuthorizedSession(creds) as session:
+            folder = session.get(f'https://www.googleapis.com/drive/v3/files/{self.folder_id}',
+                                 params={'fields': 'id,mimeType'}, timeout=30)
+            folder.raise_for_status()
+            if folder.json().get('mimeType') != 'application/vnd.google-apps.folder':
+                raise ValueError('The configured SMS Drive source must be a folder')
             token = None
             while True:
                 params = {'q': f"'{self.folder_id}' in parents and trashed=false",

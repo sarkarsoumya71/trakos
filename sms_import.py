@@ -22,8 +22,30 @@ BANKS = {
     'HDFC': r'hdfc',
     'CBI': r'cent(?:ral)?\s*bank|centbk|cbin|\bcbi\b',
 }
-MONEY = r'(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)(?!\d)'
-ACCOUNT = r'(?:a/c|ac(?:ct)?(?:ount)?|card)\s*(?:no\.?|number|ending(?:\s+in)?|xx)?\s*[:.*xX -]*([\d*xX]{4,})'
+MONEY = r'(?:INR\.?|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,3})?)(?![\d.])'
+ACCOUNT = r'\b(?:a/c|account|acct|ac|card|DC)\s*(?:no\.?|number|ending(?:\s+in)?|xx)?\s*[:.*xX -]*([\d*xX]{4,})'
+
+
+def extract_merchant(body, direction, autopay=False):
+    """Prefer merchant/payee fields, never the source bank or fraud-help footer."""
+    body = re.split(r'\b(?:Not You\?|If not done by you\?)', body, flags=re.I)[0]
+    patterns = []
+    if autopay:
+        patterns.append(r'(?im)^For[ \t]+([^\r\n]+)')
+    if direction == 'debit':
+        patterns += [r'\bat\s+(?:POS\s+)?(.+?)(?=\s+on\b|\r?\n|$)',
+                     r'\btowards\s+(.+?)(?=\s+UMRN\b|\r?\n|$)',
+                     r'\bto\s+(?:VPA\s+)?(.+?)(?=\s*\(?UPI\b|\s+(?:on|via|using|Ref|UTR|Avl|Available|Bal)\b|\r?\n|$)']
+    else:
+        patterns += [r'\bBy\.\s*(.+?)(?=\s*-CBoI\b|\r?\n|$)',
+                     r'\bfrom\s+(?:VPA\s+)?(.+?)(?=\s*\(?UPI\b|\s+(?:on|via|using|Ref|UTR|Avl|Available|Bal)\b|\r?\n|$)']
+    for pattern in patterns:
+        match = re.search(pattern, body, re.I)
+        if match:
+            name = match.group(1).strip(' .,-()')
+            if not re.match(r'(?:your\s+)?(?:a/c|account|card|HDFC\s+Bank|Central\s+Bank)\b', name, re.I):
+                return name[:120]
+    return ''
 
 
 def fingerprint(*values):
@@ -58,12 +80,26 @@ def parse_sms(sender: str, body: str, timestamp_ms: str):
         return None, 'otp'
     if re.search(r'\b(?:failed|declined|unsuccessful|will be|scheduled|due date|payment due|requested|request to pay)\b', body, re.I):
         return None, 'non_transaction'
+    if sender.upper().endswith('-P') or re.search(
+        r'AutoPay Active|UPI Registration|Registration Alert|Login Alert|Biometric Login|'
+        r'Forex Markup fee applies|Funds are blocked|UPI-Mandate.*(?:created|revoked|cancelled)|'
+        r'Congrats!.*voucher|qualified for.*Lounge Voucher|Claim your Lifetime|'
+        r'Cent rewards|Download our Digital Banking|tried reaching you|reset your IPIN|'
+        r'Seeking UPI transaction confirmation', body, re.I | re.S):
+        return None, 'non_transaction'
+    autopay = bool(re.search(r'AutoPay\s*\(E-mandate\)\s*Success', body, re.I))
+    if autopay and re.search(r'Txn Amt:\s*(?:USD|EUR|GBP)', body, re.I):
+        return None, 'foreign_currency_receipt'
     direction_patterns = [
-        ('debit', rf'{MONEY}\s*(?:has been |is |was |been )?(?:debited|spent|paid|withdrawn|sent)\b'),
+        ('debit', rf'{MONEY}\s*(?:has been |is |was |been )?(?:debited|deducted|spent|paid|withdrawn|sent)\b'),
         ('credit', rf'{MONEY}\s*(?:has been |is |was |been )?(?:credited|received|refunded|reversed)\b'),
         ('debit', rf'\b(?:debited|spent|paid|withdrawn|sent)\s*(?:by |with |for |of |: )?{MONEY}'),
         ('credit', rf'\b(?:credited|received|refunded|reversed)\s*(?:by |with |for |of |: )?{MONEY}'),
     ]
+    if autopay:
+        direction_patterns.append(('debit', rf'Txn Amt:\s*{MONEY}'))
+    if re.search(r'\bcard\b.*\bused at POS\b', body, re.I):
+        direction_patterns.append(('debit', rf'\bfor txn\s+{MONEY}'))
     matches = [(direction, match) for direction, pattern in direction_patterns
                for match in re.finditer(pattern, body, re.I)]
     unique = {(d, m.group(1)) for d, m in matches}
@@ -78,8 +114,14 @@ def parse_sms(sender: str, body: str, timestamp_ms: str):
     except (ValueError, OverflowError, OSError, InvalidOperation):
         return None, 'invalid_amount_or_time'
     # Prefer the explicit bank transaction date over delivery time.
-    date_match = re.search(r'\bon\s+(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})(?:\s+(\d{2}:\d{2}(?::\d{2})?))?', body, re.I)
-    if date_match:
+    iso_match = re.search(r'\bon\s+(\d{4}-\d{2}-\d{2}:\d{2}:\d{2}:\d{2})', body, re.I)
+    date_match = re.search(r'\b(?:on\s*:?\s*|Dt:\s*)(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})(?:\s+(?:at\s+)?(\d{2}:\d{2}(?::\d{2})?))?', body, re.I)
+    if iso_match:
+        try:
+            occurred = datetime.strptime(iso_match.group(1), '%Y-%m-%d:%H:%M:%S').replace(tzinfo=TZ)
+        except ValueError:
+            return None, 'invalid_transaction_date'
+    elif date_match:
         raw_date = date_match.group(1).replace('-', '/')
         try:
             fmt = '%d/%m/%Y' if len(raw_date.split('/')[-1]) == 4 else '%d/%m/%y'
@@ -94,10 +136,11 @@ def parse_sms(sender: str, body: str, timestamp_ms: str):
     account = re.sub(r'\D', '', account_match.group(1))[-4:] if account_match else ''
     ref = re.search(r'\b(?:UPI\s*(?:Ref(?:erence)?(?:\s*No\.?)?|txn(?:\s*id)?)|UTR|RRN|Ref(?:erence)?(?:\s*(?:No\.?|ID))?)\s*[:#.-]?\s*([A-Z0-9]{6,40})\b', body, re.I)
     reference = ref.group(1).upper() if ref and any(c.isdigit() for c in ref.group(1)) else ''
-    merchant_match = re.search(r'\b(?:to|at|from)\s+(?!(?:your\s+)?(?:a/c|account|card)\b)(.+?)(?=\s+(?:on|via|using|UPI|Ref|UTR|Avl|Available|Bal|from\s+a/c)\b|[;\n]|$)', body, re.I)
-    merchant = merchant_match.group(1).strip(' .,-')[:120] if merchant_match else ''
-    if merchant and re.match(r'(?:your\s+)?(?:a/c|account|card)\b', merchant, re.I):
-        merchant = ''
+    if not reference:
+        extra_ref = re.search(r'(?:\bXUTR/|\bUPI\s+)([A-Z0-9]{6,40})\b', body, re.I)
+        if extra_ref and any(c.isdigit() for c in extra_ref.group(1)):
+            reference = extra_ref.group(1).upper()
+    merchant = extract_merchant(body, direction, autopay)
     kind = 'expense' if direction == 'debit' else 'income'
     if re.search(r'\b(?:refund|refunded|reversal|reversed)\b', body, re.I):
         kind = 'refund'
@@ -108,7 +151,7 @@ def parse_sms(sender: str, body: str, timestamp_ms: str):
     elif re.search(r'\b(?:ATM|cash withdrawal|withdrawn)\b', body, re.I):
         kind = 'cash_withdrawal'
     payment = 'UPI' if re.search(r'\bUPI\b', body, re.I) else 'BANK'
-    if account_match and account_match.group(0).lower().startswith('card'):
+    if account_match and re.match(r'(?:card|DC)\b', account_match.group(0), re.I):
         payment = 'CARD1' if bank == 'HDFC' else 'CARD2'
     return Transaction(occurred.isoformat(), int(paise), direction, bank, account,
                        merchant, reference, payment, kind), 'parsed'

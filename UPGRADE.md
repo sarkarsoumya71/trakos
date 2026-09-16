@@ -13,6 +13,10 @@ Started from actual repository commit `b84ba46`, rather than reconstructed chat 
 - `/month` means the current calendar month through today. Summaries ignore non-month tabs and stop on worksheet read failures rather than silently reporting partial totals.
 - Category buttons are bound to their pending entry; old buttons cannot categorize a new expense. Pending dates are fixed before category selection.
 
+## Bank-template validation
+
+The supplied real backup exposed missing templates and merchant/date extraction errors. These are corrected using synthetic test examples, without committing private SMS. INR Autopay successes and direct debit/card alerts can overlap; uncertain matches stay in review. Mandate IDs are not treated as transaction references. Foreign-currency Autopay receipts stay separate from INR spending. Generic CBI balance alerts often contain no merchant, so category input may still be needed. Drive polling now verifies that the source is an accessible folder before claiming success.
+
 ## Persistence and recovery
 
 `sms_import.py` owns local parsing, atomic XML imports, integer-paise amounts, duplicate candidates, review decisions and merchant rules. `sms_workflow.py` owns Drive polling, Telegram review and Sheet projections. `sms_cli.py` provides an offline preview.
@@ -23,7 +27,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 ## Validation
 
-- 32 local automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, exclusions and crash/retry recovery.
+- 45 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, exclusions and crash/retry recovery.
 - Live Groq smoke test passed with two synthetic expenses; no real bank SMS was sent to Groq.
 - Dependency checks and Python compilation passed locally. CI targets Python 3.12 to match Docker.
 - Read-only Railway inspection found no Volume on the existing Trakos service.
@@ -31,8 +35,8 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 ## Before activation
 
-1. Obtain the actual XML backup or Drive folder. Connected Drive searches did not locate it.
-2. Validate real HDFC/CBI templates, account suffixes, merchant extraction, reference numbers, duplicate pairs, delayed alerts, refunds, failures and transfers.
+1. Locate and verify the actual Google Drive backup folder. The supplied local XML has been inspected, but connected Drive searches have not found its cloud source.
+2. Real HDFC/CBI template checks now cover ISO card timestamps, multiline UPI payees, CBI NEFT credits with three decimal places, deductions, POS purchases and successful Autopay notices. Synthetic regression fixtures protect privacy. Verify the final import and review flow in deployment before activation.
 3. Confirm the owner's transfer/card-payment accounting preference. Review offers exclusion without deleting transactions.
 4. Add the persistent Volume, test a small import end to end, then enable Drive polling.
 5. Back up the existing Sheet before legacy date normalization. Historical dates are inferred from displayed DD/MM values and month-tab names; inconsistent rows need review.
@@ -48,7 +52,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 - Old unsupported imports are not automatically reparsed after parser changes. `/unparsed` shows the first five; dismissal/editing is not implemented.
 - Drive scans direct child files named `sms*.xml`, revisits backups, and uses content fingerprints. Set the exact nested folder ID if needed.
 - Freshness is limited by the phone's backup schedule. Hourly polling cannot make weekly backups current.
-- Volume-loss recovery and real-bank end-to-end behavior remain unverified until the backup and deployment setup are available.
+- Volume-loss recovery and live end-to-end behavior remain unverified until the Drive folder and deployment setup are available. Offline import/re-import of the supplied real backup has been verified. Foreign-currency receipts remain unparsed and are never converted into INR by guessing.
 
 ## Primary sources checked
 
