@@ -18,7 +18,7 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 - Equal amounts alone never auto-merge. Possible duplicates remain separate for review.
 - Review also checks existing monthly entries for equal amounts and dates.
 - Transfers, card payments, withdrawals, income and refunds can stay in the ledger without entering spending totals.
-- Every parsed transaction starts in review. A category choice approves a debit and learns a merchant-category suggestion.
+- Explicit own-account transfers and credit-card bill payments are retained and automatically excluded from spending. Other parsed transactions start in review; a category choice approves a debit and learns a merchant-category suggestion.
 - Unsupported known-bank alerts are inspectable with `/unparsed`.
 
 **SMS import is off by default.** Validate real bank templates before activation. See [setup](SETUP.md) and [upgrade notes](UPGRADE.md).

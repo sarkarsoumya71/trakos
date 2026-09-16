@@ -256,6 +256,9 @@ class SMSWorkflow:
             for i in range(0, len(categories), 2):
                 buttons.append([InlineKeyboardButton(categories[j], callback_data=f"sms:{tx['id']}:cat:{j}") for j in range(i, min(i+2, len(categories)))])
         buttons.append([InlineKeyboardButton('Keep, exclude from spending', callback_data=f"sms:{tx['id']}:exclude")])
+        buttons.append([InlineKeyboardButton('Transfer between my accounts', callback_data=f"sms:{tx['id']}:transfer")])
+        if tx['direction'] == 'debit':
+            buttons.append([InlineKeyboardButton('Credit-card bill payment', callback_data=f"sms:{tx['id']}:card_payment")])
         buttons.append([InlineKeyboardButton('Already counted / duplicate', callback_data=f"sms:{tx['id']}:duplicate")])
         await update.message.reply_text('\n'.join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 

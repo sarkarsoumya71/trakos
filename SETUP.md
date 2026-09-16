@@ -1,4 +1,4 @@
-﻿# Trakos setup
+# Trakos setup
 
 For an existing deployment, retain the Telegram token, service-account credentials, Sheet ID and allowed-user list. Never put credentials in GitHub or chat.
 
@@ -50,6 +50,7 @@ Use unencrypted SMS-only XML under 20 MB, excluding MMS/call logs. See [SyncTech
 
 ## Review and recovery
 
+- Explicit own-account transfers and credit-card bill payments are kept in the ledger and automatically excluded from spending. For uncertain matches, use the dedicated transfer or card-bill button in `/review`.
 - In `/review`, choosing a category counts a debit as spending. **Keep, exclude from spending** retains income, refunds, transfers or card bill payments without adding them to totals.
 - **Already counted / duplicate** keeps the audit record without adding a second expense.
 - `/retrysms` retries Sheet sync. Do not manually re-enter expenses after a sync failure.

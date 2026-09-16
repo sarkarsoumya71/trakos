@@ -18,6 +18,7 @@ from defusedxml import ElementTree
 TZ = ZoneInfo('Asia/Kolkata')
 MAX_BYTES = 20 * 1024 * 1024
 MAX_MESSAGES = 100000
+NON_SPENDING_KINDS = frozenset({'transfer', 'card_payment'})
 BANKS = {
     'HDFC': r'hdfc',
     'CBI': r'cent(?:ral)?\s*bank|centbk|cbin|\bcbi\b',
@@ -144,7 +145,8 @@ def parse_sms(sender: str, body: str, timestamp_ms: str):
     kind = 'expense' if direction == 'debit' else 'income'
     if re.search(r'\b(?:refund|refunded|reversal|reversed)\b', body, re.I):
         kind = 'refund'
-    elif re.search(r'(?:credit\s*card|card\s+bill).*(?:payment|paid)|payment.*credit\s*card', body, re.I):
+    elif re.search(r'\b(?:credit\s+card|card)\s+bill\s*(?:payment|paid|repayment|settlement)?\b|'
+                   r'\b(?:payment|paid|repayment)\s+(?:towards|of|for|to)\s+(?:your\s+)?credit\s+card\b', body, re.I):
         kind = 'card_payment'
     elif re.search(r'\b(?:self transfer|own account)\b', body, re.I):
         kind = 'transfer'
@@ -190,6 +192,11 @@ class Ledger:
                     PRIMARY KEY(owner, bank, merchant)
                 );
             ''')
+            # Apply the accounting rule to unresolved entries only. Previously
+            # exported expenses require explicit reconciliation, not a silent rewrite.
+            db.execute("""UPDATE transactions SET status='exclude',
+                reason='Internal money movement; excluded from spending'
+                WHERE status='review' AND exported=0 AND kind IN ('transfer','card_payment')""")
 
     @contextmanager
     def connect(self):
@@ -268,6 +275,8 @@ class Ledger:
                         data = asdict(tx)
                         data.update(owner=owner, possible_duplicate=candidate['id'] if candidate else None,
                                     reason='Check possible duplicate/own transfer' if candidate else 'Confirm transaction and category')
+                        if tx.kind in NON_SPENDING_KINDS:
+                            data.update(status='exclude', reason='Internal money movement; excluded from spending')
                         columns = ','.join(data)
                         tx_id = db.execute(f'INSERT INTO transactions ({columns}) VALUES ({",".join("?" for _ in data)})', tuple(data.values())).lastrowid
                         report['new'] += 1
@@ -305,7 +314,7 @@ class Ledger:
             return [dict(r) for r in db.execute('SELECT sender,body,reason FROM messages WHERE owner=? AND transaction_id IS NULL LIMIT ?', (owner, limit))]
 
     def resolve(self, tx_id, owner, action, category=None):
-        if action not in ('expense', 'exclude', 'duplicate'):
+        if action not in ('expense', 'exclude', 'duplicate', 'transfer', 'card_payment'):
             raise ValueError('Invalid review action')
         with self.connect() as db:
             tx = db.execute('SELECT * FROM transactions WHERE id=? AND owner=?', (tx_id, owner)).fetchone()
@@ -313,6 +322,12 @@ class Ledger:
                 return False
             if action == 'expense' and (tx['direction'] != 'debit' or not category):
                 raise ValueError('Only a categorized debit can be approved as spending')
+            if action == 'expense' and tx['kind'] in NON_SPENDING_KINDS:
+                raise ValueError('Own-account transfers and card bill payments are not spending')
+            if action in NON_SPENDING_KINDS:
+                db.execute("UPDATE transactions SET kind=?,status='exclude',reason=? WHERE id=?",
+                           (action, 'Confirmed internal money movement; excluded from spending', tx_id))
+                return True
             db.execute('UPDATE transactions SET status=?,category=? WHERE id=?',
                        ('approved' if action == 'expense' else action, category or tx['category'], tx_id))
             if action == 'expense' and tx['merchant']:

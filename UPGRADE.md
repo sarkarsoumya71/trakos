@@ -27,7 +27,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 ## Validation
 
-- 45 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, exclusions and crash/retry recovery.
+- 51 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, exclusions and crash/retry recovery.
 - Live Groq smoke test passed with two synthetic expenses; no real bank SMS was sent to Groq.
 - Dependency checks and Python compilation passed locally. CI targets Python 3.12 to match Docker.
 - Read-only Railway inspection found no Volume on the existing Trakos service.
@@ -37,7 +37,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 1. Locate and verify the actual Google Drive backup folder. The supplied local XML has been inspected, but connected Drive searches have not found its cloud source.
 2. Real HDFC/CBI template checks now cover ISO card timestamps, multiline UPI payees, CBI NEFT credits with three decimal places, deductions, POS purchases and successful Autopay notices. Synthetic regression fixtures protect privacy. Verify the final import and review flow in deployment before activation.
-3. Confirm the owner's transfer/card-payment accounting preference. Review offers exclusion without deleting transactions.
+3. The accounting policy is confirmed: own-account transfers and credit-card bill payments stay in the ledger and are excluded from spending. Explicitly identified types are excluded automatically; uncertain transactions remain in review, with dedicated buttons to confirm either type. Equal amounts alone never establish account ownership.
 4. Add the persistent Volume, test a small import end to end, then enable Drive polling.
 5. Back up the existing Sheet before legacy date normalization. Historical dates are inferred from displayed DD/MM values and month-tab names; inconsistent rows need review.
 
@@ -45,7 +45,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 - Unencrypted SMS XML only, maximum 20 MB and 100,000 messages. No MMS, call logs, ZIPs or encrypted backups.
 - Conservative English templates and known HDFC/CBI senders only. Other bank senders are ignored; unsupported known-bank alerts are retained.
-- Every new transaction needs review in this initial rollout. Merchant learning suggests categories, not automatic approval.
+- Every new spending candidate needs review in this initial rollout; explicit own-account transfers and card bill payments are excluded automatically. Merchant learning suggests categories, not automatic approval.
 - Fuzzy matches and own transfers are flagged, not automatically merged. Different bank legs can be flagged when they share an explicit reference; other transfers require owner review.
 - Income/refunds remain in the ledger but do not reduce spending totals. No net-cash-flow dashboard is included.
 - Existing monthly overlaps are checked at SMS review time. Later manual duplicates are not automatically reconciled against previously approved SMS.
