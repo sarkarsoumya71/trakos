@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+*.json
+*.xml
+*.csv
+*.sqlite3*
+*.pickle
+data
+.private
+__pycache__
