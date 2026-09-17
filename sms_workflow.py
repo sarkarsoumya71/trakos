@@ -454,10 +454,13 @@ class SMSWorkflow:
                 log.warning('Scheduled SMS sync failed (%s)', self.last_error)
             await asyncio.sleep(interval)
 
-    def report_freshness(self):
+    def report_freshness(self, now=None):
         if self.latest_backup_upload:
             stamp = datetime.fromisoformat(self.latest_backup_upload.replace('Z', '+00:00')).astimezone(self.bot.TIMEZONE)
-            return f'Latest SMS backup upload: {stamp:%d %b %Y, %H:%M} IST.'
+            text = f'Latest SMS backup upload: {stamp:%d %b %Y, %H:%M} IST.'
+            if stamp.date() < (now or datetime.now(self.bot.TIMEZONE)).date():
+                text += '\nNo SMS backup from today yet; today’s total may be incomplete.'
+            return text
         return 'SMS backup upload time is not available yet.'
 
     async def refresh_for_report(self):
@@ -556,7 +559,7 @@ class SMSWorkflow:
                     log.warning('Pre-report SMS refresh failed (%s)', self.last_error)
                     refresh_failed = True
             snapshot = await asyncio.to_thread(read_spending, self.bot, now)
-            freshness = self.report_freshness()
+            freshness = self.report_freshness(now)
             if refresh_failed:
                 freshness += '\nSMS refresh failed; this report covers entries already saved in the sheet.'
             await self.telegram.send_message(chat_id=self.owner,

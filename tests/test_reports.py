@@ -160,6 +160,12 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             restored=SMSWorkflow(bot)
         self.assertIn('17 Sep 2026, 17:30',restored.report_freshness())
 
+    async def test_old_backup_explicitly_warns_about_incomplete_today(self):
+        self.flow.latest_backup_upload='2026-09-16T12:00:00Z'
+        self.assertIn('today’s total may be incomplete',self.flow.report_freshness(self.now))
+        self.flow.latest_backup_upload='2026-09-17T12:00:00Z'
+        self.assertNotIn('incomplete',self.flow.report_freshness(self.now))
+
     async def test_commands_require_owner_and_private_chat(self):
         update=MagicMock()
         update.effective_user.id=2
