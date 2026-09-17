@@ -10,6 +10,12 @@ The owner requested automatic recording and Telegram notifications instead of re
 
 The historical-overlap policy is bounded by `SMS_BACKLOG_MAX_ID`: optional exclusion retains uncertain older overlaps without increasing spending totals. Future ambiguous matches remain exceptions. Failed categorization or Sheet reads leave unresolved transactions retryable. Notification state persists, and a large initial import sends one summary instead of hundreds of messages. Tests cover response validation, privacy filtering, explicit decisions, owner isolation, retry recovery and batched writes.
 
+## Daily expense reports — 17 September 2026
+
+`/check` combines today, Monday-to-today week and calendar-month spending, with category totals and today's purchases. `/today`, `/week` and `/month` use the same exact-paise calculator. Reports read only relevant monthly tabs and exclude the SMS audit ledger. `/week` now means the calendar week instead of the previous seven days.
+
+The nightly report has a configurable India-time delivery schedule, refreshes Drive first, shows the latest backup upload time, and persists successful delivery dates on the Volume. Invalid Sheet data or read failures stop reporting rather than silently dropping expenses. Normal restarts do not repeat a delivered report; the Telegram-send/local-acknowledgement crash window remains documented.
+
 - Groq already used `openai/gpt-oss-120b` and returned arrays. The model is now configurable and the prompt year is dynamic.
 - Reproduced substring category errors (`service fee` matched `vi`; `water bill` matched `water`). Matching now uses word boundaries and prefers longer phrases.
 - An empty allowlist previously granted access. Startup now requires a valid allowlist; category callbacks also enforce it.
@@ -33,7 +39,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 ## Validation
 
-- 70 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, automatic categorization, notifications, exclusions and crash/retry recovery.
+- 87 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, automatic categorization, notifications, exclusions, calendar-period reports, scheduled report delivery and crash/retry recovery.
 - Live Groq smoke test passed with two synthetic expenses; no real bank SMS was sent to Groq.
 - Dependency checks and Python compilation passed locally. CI targets Python 3.12 to match Docker.
 - Railway now has a persistent Volume mounted at `/data` for the SMS database.

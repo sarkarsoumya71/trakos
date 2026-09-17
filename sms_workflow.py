@@ -14,7 +14,7 @@ from pathlib import Path
 import gspread
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from sms_import import Ledger, MAX_BYTES, fingerprint
@@ -42,7 +42,12 @@ class SMSWorkflow:
             raise ValueError('SMS_DRIVE_FOLDER_ID must be the folder ID, not the URL')
         self.lock = asyncio.Lock()
         self.poll_task = None
-        self.last_drive_check = 'Not checked yet'
+        self.report_task = None
+        self.daily_report_time = os.environ.get('DAILY_REPORT_TIME', '22:00')
+        if not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', self.daily_report_time):
+            raise ValueError('DAILY_REPORT_TIME must be HH:MM in India time')
+        self.last_drive_check = self.db.get_sync_state('last_drive_check') or 'Not checked yet'
+        self.latest_backup_upload = self.db.get_sync_state('latest_backup_upload')
         self.last_error = None
         self.telegram = None
 
@@ -187,6 +192,7 @@ class SMSWorkflow:
         creds = Credentials.from_service_account_info(json.loads(self.bot.GOOGLE_CREDS_JSON),
                     scopes=['https://www.googleapis.com/auth/drive.readonly'])
         reports = []
+        backup_uploads = []
         with AuthorizedSession(creds) as session:
             folder = session.get(f'https://www.googleapis.com/drive/v3/files/{self.folder_id}',
                                  params={'fields': 'id,mimeType'}, timeout=30)
@@ -196,7 +202,7 @@ class SMSWorkflow:
             token = None
             while True:
                 params = {'q': f"'{self.folder_id}' in parents and trashed=false",
-                          'fields': 'nextPageToken,files(id,name,size)', 'pageSize': 100}
+                          'fields': 'nextPageToken,files(id,name,size,modifiedTime)', 'pageSize': 100}
                 if token:
                     params['pageToken'] = token
                 response = session.get('https://www.googleapis.com/drive/v3/files', params=params, timeout=30)
@@ -205,6 +211,8 @@ class SMSWorkflow:
                 for file in page.get('files', []):
                     if not file['name'].lower().startswith('sms') or not file['name'].lower().endswith('.xml'):
                         continue
+                    if file.get('modifiedTime'):
+                        backup_uploads.append(file['modifiedTime'])
                     if int(file.get('size', 0)) > MAX_BYTES:
                         raise ValueError('A Drive backup is over 20 MB. Export SMS only.')
                     with session.get(f"https://www.googleapis.com/drive/v3/files/{file['id']}",
@@ -220,6 +228,10 @@ class SMSWorkflow:
                 if not token:
                     break
         self.last_drive_check = datetime.now(self.bot.TIMEZONE).strftime('%d %b %H:%M')
+        self.db.set_sync_state('last_drive_check', self.last_drive_check)
+        if backup_uploads:
+            self.latest_backup_upload = max(backup_uploads)
+            self.db.set_sync_state('latest_backup_upload', self.latest_backup_upload)
         self.last_error = None
         return reports
 
@@ -359,6 +371,7 @@ class SMSWorkflow:
         stats = self.db.stats(update.effective_user.id)
         await update.message.reply_text('SMS ledger\n' + '\n'.join(f'{k}: {v}' for k, v in stats.items()) +
             f"\nAutomatic categorization: {'On' if self.auto_enabled else 'Off'}\n" +
+            f"Daily report: {self.daily_report_time} IST" + ('\n' if os.environ.get('DAILY_REPORT_ENABLED', '0') == '1' else ' (off)\n') +
             f"\nLast Drive check: {self.last_drive_check}\nLast Drive error: {self.last_error or 'None'}\n"
             'Use /syncsms, /review, /unparsed, /retrysms or /exportledger.')
 
@@ -441,16 +454,85 @@ class SMSWorkflow:
                 log.warning('Scheduled SMS sync failed (%s)', self.last_error)
             await asyncio.sleep(interval)
 
+    def report_freshness(self):
+        if self.latest_backup_upload:
+            stamp = datetime.fromisoformat(self.latest_backup_upload.replace('Z', '+00:00')).astimezone(self.bot.TIMEZONE)
+            return f'Latest SMS backup upload: {stamp:%d %b %Y, %H:%M} IST.'
+        return 'SMS backup upload time is not available yet.'
+
+    async def daily_report_once(self, now=None):
+        if os.environ.get('DAILY_REPORT_ENABLED', '0') != '1':
+            return False
+        now = now or datetime.now(self.bot.TIMEZONE)
+        now = now.astimezone(self.bot.TIMEZONE)
+        report_date = now.date().isoformat()
+        if now.strftime('%H:%M') < self.daily_report_time or self.db.report_delivered(self.owner, report_date):
+            return False
+        from expense_reports import read_spending, render
+        async with self.lock:
+            if self.db.report_delivered(self.owner, report_date):
+                return False
+            refresh_failed = False
+            if self.folder_id:
+                try:
+                    await asyncio.to_thread(self.drive_import)
+                    await self.complete_sync(self.owner, self.telegram)
+                except Exception as exc:
+                    self.last_error = type(exc).__name__
+                    log.warning('Pre-report SMS refresh failed (%s)', self.last_error)
+                    refresh_failed = True
+            snapshot = await asyncio.to_thread(read_spending, self.bot, now)
+            freshness = self.report_freshness()
+            if refresh_failed:
+                freshness += '\nSMS refresh failed; this report covers entries already saved in the sheet.'
+            await self.telegram.send_message(chat_id=self.owner,
+                text=render(snapshot, freshness=freshness, nightly=True))
+            self.db.mark_report_delivered(self.owner, report_date)
+            log.info('Daily spending report delivered for %s', report_date)
+        return True
+
+    async def report_loop(self):
+        while True:
+            try:
+                await self.daily_report_once()
+                delay = 60
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning('Daily spending report failed (%s); retrying in five minutes', type(exc).__name__)
+                delay = 300
+            await asyncio.sleep(delay)
+
     async def start(self, app):
         self.telegram = app.bot
+        try:
+            await app.bot.set_my_commands([BotCommand(name, description) for name, description in [
+                ('check', 'Today, this week and this month in one report'),
+                ('today', "Today's spending, purchases and categories"),
+                ('week', 'Spending from Monday through today'),
+                ('month', 'Current calendar month from the 1st'),
+                ('syncsms', 'Check Drive and record new SMS transactions'),
+                ('smsstatus', 'Import status and daily report schedule'),
+                ('sheet', 'Open the expense sheet'),
+                ('smscategory', 'Correct a saved category: ID Category'),
+                ('review', 'Review exceptional or possible duplicate entries'),
+                ('categories', 'Show expense categories'),
+                ('help', 'Show all commands')]])
+        except Exception as exc:
+            log.warning('Telegram command menu update failed (%s)', type(exc).__name__)
         if self.folder_id:
             self.poll_task = asyncio.create_task(self.poll())
+        if os.environ.get('DAILY_REPORT_ENABLED', '0') == '1':
+            self.report_task = asyncio.create_task(self.report_loop())
+            log.info('Daily spending reports enabled at %s IST', self.daily_report_time)
 
     async def stop(self, app):
-        if self.poll_task:
-            self.poll_task.cancel()
+        for task in (self.poll_task, self.report_task):
+            if not task:
+                continue
+            task.cancel()
             try:
-                await self.poll_task
+                await task
             except asyncio.CancelledError:
                 pass
 

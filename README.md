@@ -29,7 +29,8 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 
 | Command | Purpose |
 | --- | --- |
-| `/today`, `/week`, `/month` | Today, last seven calendar days, calendar month through today |
+| `/check` or `/report` | Combined today, Monday-to-today week, and calendar-month report |
+| `/today`, `/week`, `/month` | Detailed view for today, this calendar week, or this calendar month |
 | `/sheet`, `/categories`, `/help` | Existing bot tools |
 | `/sort` | Normalize matching monthly dates and sort A:G, preserving H:I |
 | `/cancel` | Cancel pending manual category choices |
@@ -43,6 +44,14 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 | `/exportledger` | Download an Excel-compatible SMS ledger CSV |
 
 SMS commands require a private chat with an allowed user. All allowed users share the configured Google Sheet; this is not a private multi-user product.
+
+## Daily spending report
+
+Reports read recorded expenses from monthly tabs, not the SMS audit ledger, so excluded transfers and possible duplicates are not counted twice. Amounts are summed in paise and grouped by category. `/today` and the combined report also list up to eight purchases; longer lists remain in the Sheet. `/week` is Monday through today, including the previous month's tab when necessary. `/month` starts on the first day of the current calendar month, never a rolling 30 days.
+
+Enable `DAILY_REPORT_ENABLED=1` and set `DAILY_REPORT_TIME=22:00` for a nightly report in Asia/Kolkata time. The existing SMS workflow, owner and persistent SQLite database are used. The scheduler checks each minute, refreshes Drive before reporting, and retries delivery failures after five minutes. A delivered-date record prevents normal restart duplicates. A crash immediately after Telegram accepts a message but before the local acknowledgement can repeat that report. If the bot restarts after the scheduled time, it sends that day's report once; it does not send older missed days.
+
+The report shows the latest observed SMS-backup upload time. A failed SMS refresh is disclosed; a failed Sheet read never produces a misleading zero or partial total. Reports are spending summaries, not available-bank-balance calculations. Phone backup frequency still controls SMS freshness.
 
 ## Local checks
 
