@@ -14,7 +14,7 @@ from pathlib import Path
 import gspread
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.service_account import Credentials
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from sms_import import Ledger, MAX_BYTES, fingerprint
@@ -23,6 +23,29 @@ log = logging.getLogger('trakos.sms')
 LEDGER_HEADER = ['ID', 'Date', 'Time', 'Amount', 'Direction', 'Bank', 'Account ending',
                  'Merchant', 'Reference', 'Payment', 'Type', 'Category', 'Status',
                  'Possible duplicate', 'Original SMS']
+
+COMMAND_MENU = [
+    ('check', 'Refresh Drive and show today, week and month'),
+    ('today', "Today's purchases and category totals"),
+    ('week', 'Spending from Monday through today'),
+    ('month', 'Current calendar month from the 1st'),
+    ('others', 'Explain Other expenses; optional: month 2'),
+    ('syncsms', 'Import the latest uploaded SMS backup'),
+    ('smsstatus', 'Import status and daily report schedule'),
+    ('sheet', 'Open your expense sheet'),
+    ('smsentry', 'Read a bank alert: /smsentry ID'),
+    ('smscategory', 'Correct a category: /smscategory ID Food'),
+    ('review', 'Review exceptional or possible duplicate entries'),
+    ('unparsed', 'Show bank alerts not yet understood'),
+    ('retrysms', 'Retry syncing saved transactions to the sheet'),
+    ('exportledger', 'Download the SMS ledger as a CSV file'),
+    ('categories', 'Show all available expense categories'),
+    ('cancel', 'Cancel pending manual expense entries'),
+    ('sort', 'Sort monthly expense sheets by date'),
+    ('report', 'Combined spending report; same as /check'),
+    ('help', 'Show instructions and available commands'),
+    ('start', 'Welcome and usage examples'),
+]
 
 
 def safe_csv(value):
@@ -583,19 +606,10 @@ class SMSWorkflow:
     async def start(self, app):
         self.telegram = app.bot
         try:
-            await app.bot.set_my_commands([BotCommand(name, description) for name, description in [
-                ('check', 'Refresh Drive and show today, week and month'),
-                ('others', 'Explain Other expenses and why they lack a category'),
-                ('today', "Today's spending, purchases and categories"),
-                ('week', 'Spending from Monday through today'),
-                ('month', 'Current calendar month from the 1st'),
-                ('syncsms', 'Check Drive and record new SMS transactions'),
-                ('smsstatus', 'Import status and daily report schedule'),
-                ('sheet', 'Open the expense sheet'),
-                ('smscategory', 'Correct a saved category: ID Category'),
-                ('review', 'Review exceptional or possible duplicate entries'),
-                ('categories', 'Show expense categories'),
-                ('help', 'Show all commands')]])
+            commands = [BotCommand(name, description) for name, description in COMMAND_MENU]
+            await app.bot.set_my_commands(commands)
+            await app.bot.set_my_commands(commands, scope=BotCommandScopeChat(self.owner))
+            await app.bot.set_chat_menu_button(chat_id=self.owner, menu_button=MenuButtonCommands())
         except Exception as exc:
             log.warning('Telegram command menu update failed (%s)', type(exc).__name__)
         if self.folder_id:
