@@ -702,7 +702,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I'll figure out the amount, description, date, and category.\n"
         "If I can't determine the category, I'll ask you.\n\n"
         "*Commands:*\n"
-        "/check — today, this week and this month together\n"
+        "/check — refresh Drive, then show today, week and month\n"
+        "/others — explain this month's Other expenses\n"
         "/today — today's purchases and categories\n"
         "/week — Monday through today\n"
         "/month — current calendar month, from the 1st\n"
@@ -788,8 +789,18 @@ async def _send_summary(update: Update, days: int, label: str):
             return
         from expense_reports import read_spending, render
         period = {0: 'today', 7: 'week', -1: 'month', None: None}[days]
+        refresh_failed = False
+        if days is None and SMS_WORKFLOW and SMS_WORKFLOW.folder_id and update.effective_user.id == SMS_WORKFLOW.owner:
+            await update.message.reply_text('Checking Drive for a newer SMS upload, then calculating your report. This does not start a backup on your phone.')
+            try:
+                await SMS_WORKFLOW.refresh_for_report()
+            except Exception as exc:
+                log.warning('On-demand SMS refresh failed (%s)', type(exc).__name__)
+                refresh_failed = True
         snapshot = await asyncio.to_thread(read_spending, sys.modules[__name__], datetime.now(TIMEZONE))
         freshness = SMS_WORKFLOW.report_freshness() if SMS_WORKFLOW else ''
+        if refresh_failed:
+            freshness += '\nCould not refresh SMS; showing entries already saved in the sheet.'
         await update.message.reply_text(render(snapshot, period=period, freshness=freshness))
     except Exception as exc:
         log.error('Summary error (%s)', type(exc).__name__)

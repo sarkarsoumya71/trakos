@@ -39,7 +39,7 @@ A stable `[trakos-sms:...]` marker in Raw Input supports retries after a crash b
 
 ## Validation
 
-- 87 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, automatic categorization, notifications, exclusions, calendar-period reports, scheduled report delivery and crash/retry recovery.
+- 92 automated tests cover manual regressions, dates, auth, stale callbacks, incomplete LLM output, amounts versus balances, overlapping backups, duplicate references, equal-amount separate purchases, account/direction separation, persistence, double clicks, hostile/malformed XML, automatic categorization, notifications, exclusions, calendar-period reports, stale-backup warnings, scheduled report delivery, Other-category details and crash/retry recovery.
 - Live Groq smoke test passed with two synthetic expenses; no real bank SMS was sent to Groq.
 - Dependency checks and Python compilation passed locally. CI targets Python 3.12 to match Docker.
 - Railway now has a persistent Volume mounted at `/data` for the SMS database.
