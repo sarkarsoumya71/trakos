@@ -11,6 +11,7 @@ import math
 import sys
 import threading
 import secrets
+import asyncio
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -40,6 +41,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 TIMEZONE = ZoneInfo("Asia/Kolkata")
 SHEET_LOCK = threading.RLock()
+SMS_WORKFLOW = None
 
 
 def sheet_locked(function):
@@ -700,9 +702,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I'll figure out the amount, description, date, and category.\n"
         "If I can't determine the category, I'll ask you.\n\n"
         "*Commands:*\n"
-        "/today — today's expenses\n"
-        "/week — last seven days' summary\n"
-        "/month — this month's summary\n"
+        "/check — today, this week and this month together\n"
+        "/today — today's purchases and categories\n"
+        "/week — Monday through today\n"
+        "/month — current calendar month, from the 1st\n"
         "/sheet — link to your sheet\n"
         "/sort — sort all sheets by date\n"
         "/categories — list all categories\n"
@@ -744,6 +747,12 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_summary(update, days=-1, label="This Month")
 
 
+async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        return
+    await _send_summary(update, days=None, label='Spending check')
+
+
 async def cmd_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sort all monthly sheets by date ascending."""
     if not is_authorized(update.effective_user.id):
@@ -774,51 +783,17 @@ async def cmd_sort(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _send_summary(update: Update, days: int, label: str):
     try:
-        sh = get_spreadsheet()
-        now = datetime.now(TIMEZONE)
-        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        cutoff = today.replace(day=1) if days == -1 else today - timedelta(days=max(0, days - 1))
-        end = today + timedelta(days=1)
-
-        total = 0.0
-        cat_totals = {}
-        count = 0
-
-        for ws in sh.worksheets():
-            try:
-                datetime.strptime(ws.title, "%B %Y")
-                rows = ws.get_all_values()[1:]
-            except ValueError:
-                continue
-            for row in rows:
-                if len(row) < 3:
-                    continue
-                try:
-                    row_date = datetime.strptime(row[0], "%d/%m/%Y").replace(tzinfo=TIMEZONE)
-                    if cutoff <= row_date < end:
-                        amt = float(str(row[2]).replace(",", ""))
-                        total += amt
-                        count += 1
-                        cat = row[4] if len(row) > 4 else "Other"
-                        cat_totals[cat] = cat_totals.get(cat, 0) + amt
-                except (ValueError, IndexError):
-                    continue
-
-        if count == 0:
-            await update.message.reply_text(f"*{label}:* No expenses logged.", parse_mode="Markdown")
+        if not update.effective_chat or update.effective_chat.type != 'private':
+            await update.message.reply_text('Use expense reports in your private chat with Trakos.')
             return
-
-        lines = [f"*{label}*\n", f"Total: *{format_inr(total)}* ({count} entries)\n"]
-        sorted_cats = sorted(cat_totals.items(), key=lambda x: -x[1])
-        for cat, amt in sorted_cats:
-            pct = (amt / total) * 100
-            lines.append(f"  {cat}: {format_inr(amt)} ({pct:.0f}%)")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-    except Exception as e:
-        log.error(f"Summary error: {e}")
-        await update.message.reply_text("Could not read sheet. Check connection.")
+        from expense_reports import read_spending, render
+        period = {0: 'today', 7: 'week', -1: 'month', None: None}[days]
+        snapshot = await asyncio.to_thread(read_spending, sys.modules[__name__], datetime.now(TIMEZONE))
+        freshness = SMS_WORKFLOW.report_freshness() if SMS_WORKFLOW else ''
+        await update.message.reply_text(render(snapshot, period=period, freshness=freshness))
+    except Exception as exc:
+        log.error('Summary error (%s)', type(exc).__name__)
+        await update.message.reply_text('Could not calculate a complete report from the sheet. Please retry; no partial total was shown.')
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -964,6 +939,7 @@ async def handle_error(update, context):
 
 
 def main():
+    global SMS_WORKFLOW
     if not TELEGRAM_TOKEN:
         raise ValueError("TELEGRAM_TOKEN not set")
     if not GOOGLE_CREDS_JSON:
@@ -977,6 +953,7 @@ def main():
 
     from sms_workflow import configured
     sms = configured(sys.modules[__name__])
+    SMS_WORKFLOW = sms
     builder = Application.builder().token(TELEGRAM_TOKEN)
     if sms:
         builder = builder.post_init(sms.start).post_stop(sms.stop)
@@ -992,6 +969,7 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler(["check", "report"], cmd_check))
     app.add_handler(CommandHandler("sort", cmd_sort))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CallbackQueryHandler(handle_category_callback, pattern=r'^cat:'))

@@ -44,7 +44,11 @@ First validate a real backup with `python sms_cli.py path/to/sms-backup.xml` and
 3. Copy its folder ID from the URL after `/folders/`.
 4. Set SMS_DRIVE_FOLDER_ID to the ID in Railway and deploy the variable change.
 5. Trakos scans direct child files named `sms*.xml` at startup and hourly. `/syncsms` forces a check.
-6. Set the phone backup schedule to match the desired freshness; a daily schedule is suitable for daily review. Trakos cannot import messages the phone has not backed up.
+6. Set the phone backup schedule to match the desired freshness; for nightly reports, schedule the phone backup before the report time. Trakos cannot import messages the phone has not backed up.
+
+### Daily expense reports
+
+Set `DAILY_REPORT_ENABLED=1` and `DAILY_REPORT_TIME=22:00` (24-hour India time) on the same service. `/check` provides the combined report immediately; `/today`, `/week` and `/month` provide individual periods. Weeks start Monday; months start on the 1st. The daily report includes category totals and today's purchases, plus the latest known SMS-backup upload time. Delivery dates persist on the Volume, and failed sends retry automatically.
 
 Use unencrypted SMS-only XML under 20 MB, excluding MMS/call logs. See [SyncTech's FAQ](https://www.synctech.com.au/sms-backup-restore/sms-faqs/).
 

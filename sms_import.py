@@ -195,6 +195,14 @@ class Ledger:
                     transaction_id INTEGER PRIMARY KEY REFERENCES transactions(id),
                     owner INTEGER NOT NULL, notified INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS report_deliveries (
+                    owner INTEGER NOT NULL, report_date TEXT NOT NULL,
+                    delivered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(owner, report_date)
+                );
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                );
             ''')
             # Apply the accounting rule to unresolved entries only. Previously
             # exported expenses require explicit reconciliation, not a silent rewrite.
@@ -393,3 +401,20 @@ class Ledger:
     def stats(self, owner):
         with self.connect() as db:
             return {r['status']: r['n'] for r in db.execute('SELECT status,COUNT(*) n FROM transactions WHERE owner=? GROUP BY status', (owner,))}
+
+    def report_delivered(self, owner, report_date):
+        with self.connect() as db:
+            return bool(db.execute('SELECT 1 FROM report_deliveries WHERE owner=? AND report_date=?', (owner, report_date)).fetchone())
+
+    def mark_report_delivered(self, owner, report_date):
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO report_deliveries(owner,report_date) VALUES (?,?)', (owner, report_date))
+
+    def get_sync_state(self, key):
+        with self.connect() as db:
+            row = db.execute('SELECT value FROM sync_state WHERE key=?', (key,)).fetchone()
+            return row['value'] if row else None
+
+    def set_sync_state(self, key, value):
+        with self.connect() as db:
+            db.execute('INSERT OR REPLACE INTO sync_state(key,value) VALUES (?,?)', (key, value))

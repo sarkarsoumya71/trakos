@@ -91,10 +91,12 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
             def now(cls, tz=None):
                 return cls(2026, 9, 16, 12, tzinfo=tz)
         update = MagicMock()
+        update.effective_chat.type = 'private'
         update.message.reply_text = AsyncMock()
         ws = MagicMock()
         ws.title = 'September 2026'
-        ws.get_all_values.return_value = [bot.HEADER_ROW,
+        ws.row_count = 200
+        ws.get.return_value = [bot.HEADER_ROW,
             ['01/09/2026', '12:00', '450', 'Chai', 'Food'],
             ['30/09/2026', '12:00', '900', 'Future', 'Food']]
         old = MagicMock()
@@ -105,7 +107,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
             await bot._send_summary(update, -1, 'This Month')
         self.assertIn('450', update.message.reply_text.call_args.args[0])
         self.assertNotIn('900', update.message.reply_text.call_args.args[0])
-        old.get_all_values.assert_not_called()
+        old.get.assert_not_called()
 
 
 if __name__ == '__main__':
