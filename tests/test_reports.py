@@ -172,3 +172,65 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             await bot.cmd_check(update,None)
             read.assert_not_called()
         self.assertIn('private chat',update.message.reply_text.call_args.args[0])
+
+    async def test_check_refreshes_before_reading_and_discloses_failure(self):
+        update=MagicMock()
+        update.effective_user.id=1
+        update.effective_chat.type='private'
+        update.message.reply_text=AsyncMock()
+        flow=SimpleNamespace(owner=1,folder_id='folder',refresh_for_report=AsyncMock(side_effect=RuntimeError('offline')),
+                             report_freshness=lambda:'Latest backup: yesterday')
+        with patch.object(bot,'ALLOWED_USER_IDS','1'),patch.object(bot,'SMS_WORKFLOW',flow),patch('expense_reports.read_spending',return_value=self.snapshot):
+            await bot.cmd_check(update,None)
+        flow.refresh_for_report.assert_awaited_once()
+        self.assertIn('does not start a backup on your phone',update.message.reply_text.call_args_list[0].args[0])
+        self.assertIn('Could not refresh SMS',update.message.reply_text.call_args.args[0])
+
+    async def test_other_expenses_show_missing_merchant_reason_and_id(self):
+        from test_sms import xml,DEBIT
+        self.flow.db.import_xml(xml(DEBIT),1)
+        self.flow.db.resolve(1,1,'expense','Other')
+        with self.flow.db.connect() as db:
+            db.execute("UPDATE transactions SET merchant='',reason='Merchant missing; recorded as Other' WHERE id=1")
+        tx=self.flow.db.get(1,1)
+        self.snapshot['periods']['month']['entries']=[{'date':self.now.date(),'paise':10000,'category':'Other',
+            'description':'HDFC Transaction','sheet':'September 2026','row':2}]
+        sh,ws=MagicMock(),MagicMock()
+        sh.worksheet.return_value=ws
+        ws.col_values.return_value=['Raw Input',f'[{self.flow.marker(tx)}]']
+        with patch('expense_reports.read_spending',return_value=self.snapshot),patch.object(bot,'get_spreadsheet',return_value=sh):
+            text=self.flow.other_expenses(1,'month',1,self.now)
+        self.assertIn('SMS #1',text)
+        self.assertIn('Not provided in the bank alert',text)
+        self.assertIn('Why Other:',text)
+        self.assertIn('/smscategory ID Food',text)
+
+    async def test_other_expenses_paginate_and_preserve_total(self):
+        self.snapshot['periods']['month']['entries']=[{'date':self.now.date(),'paise':10000,'category':'Other',
+            'description':'Test purchase '+('x'*100),'sheet':'September 2026','row':i+2} for i in range(11)]
+        sh,ws=MagicMock(),MagicMock()
+        sh.worksheet.return_value=ws
+        ws.col_values.return_value=['Raw Input']+['manual']*11
+        with patch('expense_reports.read_spending',return_value=self.snapshot),patch.object(bot,'get_spreadsheet',return_value=sh):
+            first=self.flow.other_expenses(1,'month',1,self.now)
+            second=self.flow.other_expenses(1,'month',2,self.now)
+            invalid=self.flow.other_expenses(1,'month',3,self.now)
+        self.assertEqual(first.count('Sheet row'),8)
+        self.assertEqual(second.count('Sheet row'),3)
+        self.assertIn('11 entries · total ₹1,100',first)
+        self.assertIn('Next page: /others month 2',first)
+        self.assertIn('Choose a page',invalid)
+        self.assertLess(len(first.encode('utf-16-le'))//2,4096)
+
+    async def test_others_command_rejects_unauthorized_and_bad_page(self):
+        update=MagicMock()
+        update.effective_user.id=2
+        update.effective_chat.type='private'
+        update.message.reply_text=AsyncMock()
+        with patch.object(bot,'ALLOWED_USER_IDS','1'),patch.object(self.flow,'other_expenses') as details:
+            await self.flow.others(update,SimpleNamespace(args=[]))
+            details.assert_not_called()
+            update.effective_user.id=1
+            await self.flow.others(update,SimpleNamespace(args=['month','-1']))
+            details.assert_not_called()
+        self.assertIn('Use /others',update.message.reply_text.call_args.args[0])

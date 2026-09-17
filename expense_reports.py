@@ -50,7 +50,8 @@ def read_spending(bot, now):
                         raise ValueError('Invalid amount')
                     category = str(row[4]).strip() if len(row) > 4 else ''
                     entries.append({'date': date, 'paise': int(paise), 'category': category or 'Other',
-                                    'description': row[3] if len(row) > 3 else ''})
+                                    'description': row[3] if len(row) > 3 else '',
+                                    'sheet': ws.title, 'row': index})
                 except (ValueError, InvalidOperation, IndexError) as exc:
                     raise ValueError(f'Check expense row {index} in {ws.title}') from exc
     periods = {}
@@ -89,6 +90,8 @@ def render(snapshot, period=None, freshness='', nightly=False):
             if len(entries) > 8:
                 lines.append(f'  +{len(entries) - 8} more in /sheet')
     lines.extend(['', 'Totals cover recorded spending, not your available bank balance.'])
+    if any(snapshot['periods'][key]['categories'].get('Other', 0) for key in ([period] if period else ['today', 'week', 'month'])):
+        lines.append('Other groups expenses without a more specific category. /others shows their details.')
     if freshness:
         lines.append(freshness)
     lines.append('SMS updates depend on phone backups. /syncsms checks Drive now.')

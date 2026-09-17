@@ -29,7 +29,8 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 
 | Command | Purpose |
 | --- | --- |
-| `/check` or `/report` | Combined today, Monday-to-today week, and calendar-month report |
+| `/check` or `/report` | Fetch available Drive uploads, then show today, this week and this month |
+| `/others [today\|week\|month] [page]` | Explain Other entries, with available merchant, bank and SMS details |
 | `/today`, `/week`, `/month` | Detailed view for today, this calendar week, or this calendar month |
 | `/sheet`, `/categories`, `/help` | Existing bot tools |
 | `/sort` | Normalize matching monthly dates and sort A:G, preserving H:I |
@@ -52,6 +53,10 @@ Reports read recorded expenses from monthly tabs, not the SMS audit ledger, so e
 Enable `DAILY_REPORT_ENABLED=1` and set `DAILY_REPORT_TIME=22:00` for a nightly report in Asia/Kolkata time. The existing SMS workflow, owner and persistent SQLite database are used. The scheduler checks each minute, refreshes Drive before reporting, and retries delivery failures after five minutes. A delivered-date record prevents normal restart duplicates. A crash immediately after Telegram accepts a message but before the local acknowledgement can repeat that report. If the bot restarts after the scheduled time, it sends that day's report once; it does not send older missed days.
 
 The report shows the latest observed SMS-backup upload time. A failed SMS refresh is disclosed; a failed Sheet read never produces a misleading zero or partial total. Reports are spending summaries, not available-bank-balance calculations. Phone backup frequency still controls SMS freshness.
+
+`/check` refreshes the available Drive backups before calculating its report. It cannot start SMS Backup & Restore on the phone: the existing connection grants Drive access, not remote phone control. Use the phone's scheduled backups or Back Up Now, then `/check` after uploading.
+
+`/others` defaults to this calendar month and shows eight entries per page. It explains missing or ambiguous merchant details, provides `/smsentry ID` and `/smscategory ID Category` instructions for linked SMS, and distinguishes Sheet entries with no SMS provenance. It does not invent purchase details when bank messages contain only an amount/account alert.
 
 ## Local checks
 

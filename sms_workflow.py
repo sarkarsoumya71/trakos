@@ -460,6 +460,80 @@ class SMSWorkflow:
             return f'Latest SMS backup upload: {stamp:%d %b %Y, %H:%M} IST.'
         return 'SMS backup upload time is not available yet.'
 
+    async def refresh_for_report(self):
+        async with self.lock:
+            await asyncio.to_thread(self.drive_import)
+            await self.complete_sync(self.owner, self.telegram)
+
+    def other_expenses(self, owner, period, page, now):
+        from expense_reports import clean, money, read_spending
+        with self.bot.SHEET_LOCK:
+            snapshot = read_spending(self.bot, now)
+            entries = [row for row in snapshot['periods'][period]['entries'] if row['category'].casefold() == 'other']
+            entries.sort(key=lambda row: (row['date'], row['row']), reverse=True)
+            if not entries:
+                return f'No Other expenses recorded for {period}.'
+            pages = (len(entries) + 7) // 8
+            if page < 1 or page > pages:
+                return f'Choose a page from 1 to {pages}: /others {period} 1'
+            selected = entries[(page-1)*8:page*8]
+            sh = self.bot.get_spreadsheet()
+            raw_columns = {name: sh.worksheet(name).col_values(7) for name in {row['sheet'] for row in selected}}
+            markers = {self.marker(tx): tx for tx in self.db.list(owner, limit=100000)}
+            lines = [f'Other expenses · {period} · page {page}/{pages}',
+                     f"{len(entries)} entries · total {money(sum(row['paise'] for row in entries))}",
+                     'These expenses were counted, but a more specific category was not established.']
+            for entry in selected:
+                values = raw_columns[entry['sheet']]
+                raw = str(values[entry['row']-1]) if entry['row'] <= len(values) else ''
+                match = re.search(r'\[(trakos-sms:[a-f0-9]+)\]', raw)
+                tx = markers.get(match[1]) if match else None
+                lines.append('')
+                label = f"SMS #{tx['id']}" if tx else f"Sheet row {entry['row']}"
+                lines.append(f"{label} · {entry['date']:%d %b} · {money(entry['paise'])}")
+                if tx:
+                    lines.append(f"{tx['bank']} · account ending {tx['account'] or 'unavailable'} · {tx['payment']}")
+                    lines.append(f"Merchant: {clean(tx['merchant']) if tx['merchant'] else 'Not provided in the bank alert'}")
+                    if not tx['merchant']:
+                        reason = 'The bank alert gives no merchant or purchase description.'
+                    elif tx['reason'].startswith('GPT-OSS'):
+                        reason = 'The merchant description was too unclear to classify confidently.'
+                    elif 'corrected by you' in tx['reason']:
+                        reason = 'This category was chosen by you.'
+                    else:
+                        reason = 'Recorded as Other; no more classification detail is available.'
+                    lines.append('Why Other: ' + reason)
+                else:
+                    lines.append('Description: ' + (clean(entry['description']) or 'Not provided'))
+                    lines.append('Why Other: The sheet uses Other; no linked SMS details are available.')
+            lines.extend(['', 'See a bank alert: /smsentry ID', 'Correct an SMS category: /smscategory ID Food',
+                          'For sheet-only entries, edit Category in /sheet.'])
+            if page < pages:
+                lines.append(f'Next page: /others {period} {page+1}')
+            return '\n'.join(lines)
+
+    async def others(self, update, context):
+        if not self.allowed(update):
+            return
+        args = list(context.args)
+        period = args.pop(0).lower() if args and args[0].lower() in ('today', 'week', 'month') else 'month'
+        try:
+            if len(args) > 1:
+                raise ValueError('Too many arguments')
+            page = int(args[0]) if args else 1
+            if page < 1:
+                raise ValueError('Invalid page')
+        except ValueError:
+            await update.message.reply_text('Use /others, /others today, /others week, or /others month 2.')
+            return
+        try:
+            async with self.lock:
+                text = await asyncio.to_thread(self.other_expenses, update.effective_user.id, period, page, datetime.now(self.bot.TIMEZONE))
+            await update.message.reply_text(text)
+        except Exception as exc:
+            log.warning('Other expense details failed (%s)', type(exc).__name__)
+            await update.message.reply_text('Could not read complete Other expense details. Please retry.')
+
     async def daily_report_once(self, now=None):
         if os.environ.get('DAILY_REPORT_ENABLED', '0') != '1':
             return False
@@ -507,7 +581,8 @@ class SMSWorkflow:
         self.telegram = app.bot
         try:
             await app.bot.set_my_commands([BotCommand(name, description) for name, description in [
-                ('check', 'Today, this week and this month in one report'),
+                ('check', 'Refresh Drive and show today, week and month'),
+                ('others', 'Explain Other expenses and why they lack a category'),
                 ('today', "Today's spending, purchases and categories"),
                 ('week', 'Spending from Monday through today'),
                 ('month', 'Current calendar month from the 1st'),
@@ -542,6 +617,7 @@ class SMSWorkflow:
             ('retrysms', self.retry), ('exportledger', self.export_csv)]:
             app.add_handler(CommandHandler(command, handler))
         app.add_handler(CommandHandler('smscategory', self.change_category))
+        app.add_handler(CommandHandler('others', self.others))
         app.add_handler(CallbackQueryHandler(self.callback, pattern=r'^sms:'))
         app.add_handler(MessageHandler(filters.Document.ALL, self.upload))
 
