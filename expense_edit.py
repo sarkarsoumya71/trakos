@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime
 
 import gspread
@@ -30,19 +31,27 @@ class ExpenseEditor:
     def __init__(self, flow):
         self.flow, self.bot = flow, flow.bot
         self.identity_month = {}
+        self.month_cache = {}
 
     def records(self, month=None):
         sh = self.bot.get_spreadsheet()
         result = []
-        for ws in ([sh.worksheet(month)] if month else sh.worksheets()):
+        cached = self.month_cache.get(month)
+        if month and cached and time.monotonic() - cached[0] < 30:
+            sheets = [cached[1]]
+        else:
+            sheets = [sh.worksheet(month)] if month else sh.worksheets()
+        for ws in sheets:
             try:
                 stamp = datetime.strptime(ws.title, '%B %Y')
             except ValueError:
                 continue
             if month and ws.title != month:
                 continue
-            if ws.row_values(1)[:12] != HEADERS:
-                continue
+            if not cached or cached[1] is not ws:
+                if ws.row_values(1)[:12] != HEADERS:
+                    continue
+                self.month_cache[ws.title] = (time.monotonic(), ws)
             for i, values in enumerate(ws.get(f'A2:L{ws.row_count}'), 2):
                 if not values or not values[0]:
                     continue
@@ -112,7 +121,10 @@ class ExpenseEditor:
                 if r['values'][0] == action['date'] and paise(r['values'][2]) == action['amount_paise'] and r['values'][3] == action['description']]
             if len(candidates) != 1:
                 raise ValueError('Cleanup edit target is ambiguous')
-            self.save(candidates[0], action.get('new_description', candidates[0]['values'][3]), action['category'])
+            description = action.get('new_description', candidates[0]['values'][3])
+            if candidates[0]['values'][3:5] == [description, action['category']] and candidates[0]['values'][9] == 'Confirmed':
+                return
+            self.save(candidates[0], description, action['category'])
 
     def flag_near_duplicates(self, month):
         rows = self.records(month)
@@ -157,7 +169,10 @@ class ExpenseEditor:
     def merge(self, duplicate, target, category=None):
         """Link SMS evidence to the retained row and remove only the confirmed duplicate."""
         with self.bot.SHEET_LOCK:
-            left, right = self.find(duplicate['id']), self.find(target['id'])
+            fresh = {r['id']: r for r in self.records(duplicate['sheet'])}
+            if duplicate['id'] not in fresh or target['id'] not in fresh:
+                raise ValueError('An entry is missing. Reopen the duplicate check.')
+            left, right = fresh[duplicate['id']], fresh[target['id']]
             if signature(left) != signature(duplicate) or signature(right) != signature(target):
                 raise ValueError('An entry changed. Reopen the duplicate check.')
             if left['sheet'] != right['sheet'] or left['id'] == right['id']:
