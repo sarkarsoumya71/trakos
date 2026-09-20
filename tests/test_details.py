@@ -17,6 +17,12 @@ from datetime import datetime
 
 
 class LayoutTests(unittest.TestCase):
+    def test_currency_format_does_not_accept_invalid_characters(self):
+        from expense_sheet import paise
+        self.assertEqual(paise('\u20b91,234.50'),123450)
+        with self.assertRaises(Exception):
+            paise('?123')
+
     def test_quota_retries_are_bounded(self):
         import gspread
         from expense_sheet import QuotaRetryClient
