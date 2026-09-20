@@ -17,6 +17,15 @@ from datetime import datetime
 
 
 class LayoutTests(unittest.TestCase):
+    def test_growing_month_extends_highlights_and_validation(self):
+        ws=MagicMock(row_count=2)
+        ws.col_values.return_value=['Date','01/09/2026']
+        with patch.object(bot,'format_month') as formatting,patch.object(bot,'ensure_dashboard') as dashboard,patch.object(bot,'sort_month_sheet'):
+            bot.append_to_data_area(ws,['02/09/2026','12:00',10,'Cafe','Food','UPI','10 cafe'])
+        ws.add_rows.assert_called_once()
+        formatting.assert_called_once_with(ws,bot.CATEGORY_LIST)
+        dashboard.assert_called_once_with(ws.spreadsheet,ws,bot.CATEGORY_LIST)
+
     def test_overview_stays_in_month_and_preserves_selector_on_refresh(self):
         from expense_sheet import ensure_dashboard, HIGHLIGHT_FORMULA
         sh=MagicMock()

@@ -148,7 +148,7 @@ def ensure_dashboard(sh, ws, categories):
         values.append([cat, f'=SUMIFS(C2:C,E2:E,N{i},J2:J,"Confirmed",K2:K,"Expense")'])
     ws.update(range_name='N1:O'+str(len(values)), values=values, value_input_option='USER_ENTERED')
     query = '=IFERROR(QUERY(A1:L,"select A,B,C,D,J where A is not null and J <> \'Excluded\' and J <> \'Duplicate\'"&IF(O2="All categories",""," and E = \'"&O2&"\'")&" label D \'Purchase\'",1),"No matching transactions")'
-    ws.update(range_name='Q21:Q22', values=[['Selected category transactions'], [query]], value_input_option='USER_ENTERED')
+    ws.update(range_name='Q21:Q22', values=[['Matches'], [query]], value_input_option='USER_ENTERED')
     metadata = sh.fetch_sheet_metadata({'fields':'sheets(properties(sheetId),charts(chartId,spec(title)),conditionalFormats,columnGroups)'})
     current = next(s for s in metadata['sheets'] if s['properties']['sheetId'] == ws.id)
     requests = [
