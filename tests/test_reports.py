@@ -14,7 +14,7 @@ from sms_workflow import SMSWorkflow
 
 def sheet(title, rows):
     ws = MagicMock()
-    ws.title, ws.row_count = title, 1000
+    ws.title, ws.row_count, ws.col_count = title, 1000, 12
     ws.get.return_value = [bot.HEADER_ROW[:6]] + rows
     return ws
 
@@ -42,7 +42,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['periods']['month']['categories'], {'Food':10010,'Business':20020})
         august.get.assert_not_called()
         ledger.get.assert_not_called()
-        september.get.assert_called_once_with('A1:F1000')
+        september.get.assert_called_once_with('A1:L1000')
 
     def test_week_starts_monday_and_crosses_month_boundary(self):
         result = self.snapshot(datetime(2026,9,2,22,tzinfo=bot.TIMEZONE), [

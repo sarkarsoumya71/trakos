@@ -2,6 +2,7 @@
 from collections import Counter
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from expense_sheet import INVESTMENTS, EXCLUDED, data_end_column
 
 
 def clean(text, limit=60):
@@ -32,8 +33,8 @@ def read_spending(bot, now):
                 continue
             if not first <= month <= last:
                 continue
-            # No raw input/SMS or summary-formula columns are needed for reports.
-            rows = ws.get(f'A1:F{ws.row_count}')
+            # New tabs include status/treatment; legacy tabs end before their summary.
+            rows = ws.get(f'A1:{data_end_column(ws)}{ws.row_count}')
             if not rows or rows[0][:5] != bot.HEADER_ROW[:5]:
                 raise ValueError(f'Unexpected expense headers in {ws.title}')
             for index, row in enumerate(rows[1:], 2):
@@ -49,19 +50,26 @@ def read_spending(bot, now):
                     if not paise.is_finite() or paise < 0 or paise != paise.to_integral_value():
                         raise ValueError('Invalid amount')
                     category = str(row[4]).strip() if len(row) > 4 else ''
-                    entries.append({'date': date, 'paise': int(paise), 'category': category or 'Other',
+                    status = row[9] if len(row)>9 else ('Needs details' if not category or category=='Other' else 'Confirmed')
+                    treatment = row[10] if len(row)>10 else ('Investment' if category in INVESTMENTS else 'Expense')
+                    entries.append({'date': date, 'paise': int(paise), 'category': '' if category=='Other' else category,
+                                    'status':status,'treatment':treatment,
                                     'description': row[3] if len(row) > 3 else '',
                                     'sheet': ws.title, 'row': index})
                 except (ValueError, InvalidOperation, IndexError) as exc:
                     raise ValueError(f'Check expense row {index} in {ws.title}') from exc
     periods = {}
     for key, start in starts.items():
-        selected = [row for row in entries if start <= row['date'] <= now.date()]
+        all_selected = [row for row in entries if start <= row['date'] <= now.date() and row['status'] not in EXCLUDED]
+        selected = [row for row in all_selected if row['status']=='Confirmed' and row['treatment']!='Investment']
         categories = Counter()
         for row in selected:
             categories[row['category']] += row['paise']
         periods[key] = {'start': start, 'total': sum(row['paise'] for row in selected),
-                        'count': len(selected), 'categories': categories, 'entries': selected}
+                        'count': len(selected), 'categories': categories, 'entries': selected,
+                        'pending':sum(row['paise'] for row in all_selected if row['status']=='Needs details'),
+                        'possible_duplicates':sum(row['paise'] for row in all_selected if row['status']=='Possible duplicate'),
+                        'investments':sum(row['paise'] for row in all_selected if row['status']=='Confirmed' and row['treatment']=='Investment')}
     return {'as_of': now, 'periods': periods}
 
 
@@ -78,6 +86,12 @@ def render(snapshot, period=None, freshness='', nightly=False):
         categories = data['categories'].most_common()
         for category, amount in categories[:10]:
             lines.append(f'  {clean(category, 40)}: {money(amount)}')
+        if data.get('pending'):
+            lines.append(f"  Needs details (outside confirmed total): {money(data['pending'])} — /review")
+        if data.get('possible_duplicates'):
+            lines.append(f"  Possible duplicates held aside: {money(data['possible_duplicates'])}")
+        if data.get('investments'):
+            lines.append(f"  Investments (separate): {money(data['investments'])}")
         if len(categories) > 10:
             lines.append(f"  Remaining categories: {money(sum(v for _, v in categories[10:]))}")
         if not data['count']:

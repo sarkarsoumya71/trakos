@@ -148,15 +148,16 @@ class ProjectionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_review_rows_do_not_enter_monthly_totals(self):
+    def test_review_rows_are_projected_as_pending(self):
         from sms_workflow import LEDGER_HEADER
-        sh, ws = MagicMock(), MagicMock()
+        sh, ws, monthly = MagicMock(), MagicMock(), MagicMock()
         sh.worksheet.return_value = ws
         ws.get_all_values.return_value = [LEDGER_HEADER]
         ws.row_count = 1000
-        with patch.object(bot, 'get_spreadsheet', return_value=sh), patch.object(bot, 'append_to_data_area') as append:
+        monthly.get.return_value = []
+        with patch.object(bot, 'get_spreadsheet', return_value=sh), patch.object(bot, 'get_month_sheet', return_value=monthly), patch.object(bot, 'append_to_data_area') as append:
             self.flow.export_views(1)
-            append.assert_not_called()
+            self.assertEqual(append.call_args.args[1][9], 'Needs details')
         ws.batch_update.assert_called_once()
 
     def test_crash_after_append_does_not_duplicate_on_retry(self):
@@ -167,9 +168,9 @@ class ProjectionTests(unittest.TestCase):
         ledger_ws.get_all_values.return_value = [LEDGER_HEADER]
         ledger_ws.row_count = 1000
         raw_rows = []
-        monthly.col_values.side_effect = lambda _: list(raw_rows)
+        monthly.get.side_effect = lambda _: list(raw_rows)
         def append(ws, row):
-            raw_rows.append(row[6])
+            raw_rows.append(row)
         with patch.object(bot, 'get_spreadsheet', return_value=sh), patch.object(bot, 'get_month_sheet', return_value=monthly), patch.object(bot, 'append_to_data_area', side_effect=append) as writer:
             with patch.object(self.flow.db, 'mark_exported', side_effect=RuntimeError('simulated crash')):
                 with self.assertRaises(RuntimeError):

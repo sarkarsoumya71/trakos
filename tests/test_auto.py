@@ -138,8 +138,8 @@ class AutomaticTests(unittest.IsolatedAsyncioTestCase):
         ws.get_all_values.return_value=[LEDGER_HEADER]
         ws.row_count=1000
         saved=[]
-        monthly.col_values.side_effect=lambda _: list(saved)
-        def append(_,rows): saved.extend(row[6] for row in rows)
+        monthly.get.side_effect=lambda _: list(saved)
+        def append(_,rows): saved.extend(rows)
         with patch.object(bot,'get_spreadsheet',return_value=sh), patch.object(bot,'get_month_sheet',return_value=monthly), patch.object(bot,'append_many_to_data_area',side_effect=append) as writer:
             with patch.object(self.flow.db,'mark_exported',side_effect=RuntimeError('crash')):
                 with self.assertRaises(RuntimeError): self.flow.export_views(1)
@@ -174,7 +174,7 @@ class BatchTests(unittest.TestCase):
         with patch.object(bot,'sort_month_sheet'):
             bot.append_many_to_data_area(ws,rows)
         args,kwargs=ws.update.call_args
-        self.assertEqual(args[0],'A2:G3')
+        self.assertEqual(args[0],'A2:L3')
         self.assertIsInstance(args[1][0][0],int)
         self.assertEqual(args[1][0][3],'=danger')
         self.assertEqual(kwargs['value_input_option'],'RAW')

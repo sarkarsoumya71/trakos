@@ -204,6 +204,8 @@ class Ledger:
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
             ''')
+            if 'description' not in {row[1] for row in db.execute('PRAGMA table_info(transactions)')}:
+                db.execute("ALTER TABLE transactions ADD COLUMN description TEXT NOT NULL DEFAULT ''")
             # Apply the accounting rule to unresolved entries only. Previously
             # exported expenses require explicit reconciliation, not a silent rewrite.
             db.execute("""UPDATE transactions SET status='exclude',
@@ -397,6 +399,20 @@ class Ledger:
             if tx['merchant']:
                 db.execute('INSERT OR REPLACE INTO merchant_rules VALUES (?,?,?,?)',
                            (owner, tx['bank'], tx['merchant'].casefold(), category))
+
+    def edit_details(self, tx_id, owner, description, category, status='approved'):
+        if status not in ('approved', 'review', 'exclude', 'duplicate'):
+            raise ValueError('Invalid status')
+        with self.connect() as db:
+            tx = db.execute('SELECT * FROM transactions WHERE id=? AND owner=?', (tx_id, owner)).fetchone()
+            if not tx or tx['direction'] != 'debit' or tx['kind'] in NON_SPENDING_KINDS:
+                raise ValueError('Expense not editable')
+            if status == 'approved' and not category:
+                raise ValueError('Choose a category')
+            db.execute('UPDATE transactions SET description=?,category=?,status=?,reason=?,exported=0 WHERE id=? AND owner=?',
+                (description, category, status, 'Details confirmed by you' if status == 'approved' else 'Needs details' if status == 'review' else 'Confirmed by you: '+status, tx_id, owner))
+            if category and tx['merchant'] and status == 'approved':
+                db.execute('INSERT OR REPLACE INTO merchant_rules VALUES (?,?,?,?)', (owner, tx['bank'], tx['merchant'].casefold(), category))
 
     def stats(self, owner):
         with self.connect() as db:
