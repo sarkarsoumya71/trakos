@@ -11,13 +11,13 @@ import time
 class QuotaRetryClient(gspread.HTTPClient):
     """Bounded retries only for rejected quota requests, not ambiguous writes."""
     def request(self, *args, **kwargs):
-        for attempt in range(6):
+        for attempt in range(8):
             try:
                 return super().request(*args, **kwargs)
             except gspread.exceptions.APIError as exc:
-                if exc.code != 429 or attempt == 5:
+                if exc.code != 429 or attempt == 7:
                     raise
-                time.sleep(2 ** (attempt + 1))
+                time.sleep(min(2 ** (attempt + 1), 32))
 
 HEADERS = ['Date', 'Time', 'Amount', 'Description', 'Category', 'Payment Method',
            'Raw Input', 'Bank Message', 'Entry ID', 'Status', 'Treatment', 'Source']

@@ -13,7 +13,7 @@ import threading
 import secrets
 import asyncio
 from expense_sheet import HEADERS, normalize_row, ensure_layout, ensure_dashboard, format_month, QuotaRetryClient
-from functools import wraps
+from functools import wraps, lru_cache
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -81,6 +81,7 @@ CATEGORY_LIST = [
 PAYMENT_METHODS = ["UPI", "CARD1", "CARD2", "CASH", "BANK"]
 
 
+@lru_cache(maxsize=1)
 def get_spreadsheet():
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)

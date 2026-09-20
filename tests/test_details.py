@@ -17,6 +17,31 @@ from datetime import datetime
 
 
 class LayoutTests(unittest.TestCase):
+    def test_quota_retries_are_bounded(self):
+        import gspread
+        from expense_sheet import QuotaRetryClient
+        response=MagicMock()
+        response.json.return_value={'error':{'code':429,'message':'Quota'}}
+        error=gspread.exceptions.APIError(response)
+        client=object.__new__(QuotaRetryClient)
+        with patch.object(gspread.HTTPClient,'request',side_effect=error) as request,patch('expense_sheet.time.sleep') as sleep:
+            with self.assertRaises(gspread.exceptions.APIError):
+                client.request('get','example')
+        self.assertEqual(request.call_count,8)
+        self.assertEqual(sleep.call_count,7)
+        self.assertLessEqual(max(c.args[0] for c in sleep.call_args_list),32)
+
+    def test_ambiguous_server_write_is_not_blindly_retried(self):
+        import gspread
+        from expense_sheet import QuotaRetryClient
+        response=MagicMock()
+        response.json.return_value={'error':{'code':503,'message':'Unavailable'}}
+        client=object.__new__(QuotaRetryClient)
+        with patch.object(gspread.HTTPClient,'request',side_effect=gspread.exceptions.APIError(response)) as request:
+            with self.assertRaises(gspread.exceptions.APIError):
+                client.request('post','example')
+        request.assert_called_once()
+
     def test_migration_uses_numeric_amounts_and_preserves_literal_input(self):
         ws = MagicMock(title='September 2026', row_count=200, col_count=9)
         ws.title = 'September 2026'
