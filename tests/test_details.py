@@ -17,6 +17,26 @@ from datetime import datetime
 
 
 class LayoutTests(unittest.TestCase):
+    def test_overview_stays_in_month_and_preserves_selector_on_refresh(self):
+        from expense_sheet import ensure_dashboard, HIGHLIGHT_FORMULA
+        sh=MagicMock()
+        ws=MagicMock(id=123,col_count=24,row_count=200)
+        ws.title='September 2026'
+        ws.acell.return_value.value='Business'
+        sh.fetch_sheet_metadata.return_value={'sheets':[{'properties':{'sheetId':123},
+            'charts':[{'chartId':9,'spec':{'title':'September 2026 - confirmed spending'}}],
+            'conditionalFormats':[{'booleanRule':{'condition':{'values':[{'userEnteredValue':HIGHLIGHT_FORMULA}]}}}],
+            'columnGroups':[{'range':{'startIndex':6,'endIndex':12}}]}]}
+        ensure_dashboard(sh,ws,bot.CATEGORY_LIST)
+        sh.add_worksheet.assert_not_called()
+        sh.worksheet.assert_not_called()
+        self.assertEqual(ws.update.call_args_list[0].kwargs['values'][1][1],'Business')
+        self.assertTrue(all(c.kwargs['range_name'].startswith(('N','Q')) for c in ws.update.call_args_list))
+        requests=sh.batch_update.call_args.args[0]['requests']
+        self.assertFalse(any('addChart' in r or 'addDimensionGroup' in r or 'addConditionalFormatRule' in r for r in requests))
+        highlight=next(r['updateConditionalFormatRule']['rule'] for r in requests if 'updateConditionalFormatRule' in r)
+        self.assertEqual(highlight['ranges'][0]['sheetId'],ws.id)
+        self.assertIn('$E2=$O$2',highlight['booleanRule']['condition']['values'][0]['userEnteredValue'])
     def test_currency_format_does_not_accept_invalid_characters(self):
         from expense_sheet import paise
         self.assertEqual(paise('\u20b91,234.50'),123450)
@@ -172,3 +192,7 @@ class EditTests(unittest.IsolatedAsyncioTestCase):
                     self.editor.merge(self.record,target)
                 self.editor.recover_merges()
             self.assertEqual(self.flow.db.get_sync_state('merge_pending:Mtest'),'done')
+            requests=ws.spreadsheet.batch_update.call_args.args[0]['requests']
+            self.assertFalse(any('deleteDimension' in r for r in requests))
+            deletion=next(r['deleteRange'] for r in requests if 'deleteRange' in r)
+            self.assertEqual(deletion['range']['endColumnIndex'],12)
