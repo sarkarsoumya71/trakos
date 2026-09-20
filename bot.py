@@ -121,6 +121,8 @@ def append_to_data_area(ws, row_data):
     row_data[0] = (date - datetime(1899, 12, 30)).days
     if next_row > ws.row_count:
         ws.add_rows(max(200, next_row - ws.row_count))
+        format_month(ws, CATEGORY_LIST)
+        ensure_dashboard(ws.spreadsheet, ws, CATEGORY_LIST)
     # RAW keeps descriptions and SMS bodies literal, even when they start with '='.
     # Date serials avoid Google Sheets locale-dependent date interpretation.
     ws.format(f"A{next_row}", {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}})
@@ -153,6 +155,8 @@ def append_many_to_data_area(ws, rows):
     end = start + len(converted) - 1
     if end > ws.row_count:
         ws.add_rows(end - ws.row_count + 100)
+        format_month(ws, CATEGORY_LIST)
+        ensure_dashboard(ws.spreadsheet, ws, CATEGORY_LIST)
     ws.format(f'A{start}:A{end}', {'numberFormat': {'type': 'DATE', 'pattern': 'dd/mm/yyyy'}})
     ws.update(f'A{start}:L{end}', converted, value_input_option='RAW')
     try:
