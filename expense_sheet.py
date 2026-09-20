@@ -26,7 +26,7 @@ EXCLUDED = {'Excluded', 'Duplicate'}
 
 
 def paise(value):
-    n = Decimal(str(value).replace(',', '').replace('?', '').strip()) * 100
+    n = Decimal(str(value).replace(',', '').replace('\u20b9', '').strip()) * 100
     if not n.is_finite() or n < 0 or n != n.to_integral_value():
         raise ValueError('Invalid amount')
     return int(n)
