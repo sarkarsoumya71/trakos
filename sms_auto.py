@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 import httpx
+from expense_sheet import near_manual_matches
 
 log = logging.getLogger('trakos.sms.auto')
 
@@ -31,7 +32,7 @@ async def categorize(bot, merchants):
         raise ValueError('Automatic SMS categorization needs GROQ_API_KEY')
     schema = {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {
         'type': 'object', 'properties': {'id': {'type': 'integer'},
-        'category': {'type': 'string', 'enum': bot.CATEGORY_LIST}},
+        'category': {'type': 'string', 'enum': bot.CATEGORY_LIST + ['Other']}},
         'required': ['id', 'category'], 'additionalProperties': False}}},
         'required': ['items'], 'additionalProperties': False}
     results = {}
@@ -58,7 +59,7 @@ async def categorize(bot, merchants):
             seen = set()
             for entry in entries:
                 index, category = entry['id'], entry['category']
-                if type(index) is not int or index not in range(len(batch)) or index in seen or category not in bot.CATEGORY_LIST:
+                if type(index) is not int or index not in range(len(batch)) or index in seen or category not in bot.CATEGORY_LIST + ['Other']:
                     raise ValueError('Invalid category response')
                 seen.add(index)
                 results[batch[index]] = category
@@ -103,7 +104,7 @@ def plan(transactions, pending, monthly_rows):
                     action, reason = 'duplicate', 'Already recorded in monthly sheet: matching date, amount and merchant/reference'
                 else:
                     action, reason = 'review', 'Multiple alerts match an existing expense; check duplication'
-            elif matches or uncertain:
+            elif matches or uncertain or near_manual_matches(tx, monthly_rows):
                 action, reason = 'review', 'Possible duplicate; insufficient evidence to count or discard automatically'
         decisions.append({'tx': tx, 'action': action, 'reason': reason, 'category': category})
     return decisions
@@ -131,19 +132,23 @@ async def process(flow, owner):
         tx = decision['tx']
         learned = flow.db.merchant_category(owner, tx['bank'], tx['merchant'])
         name = merchant_text(tx['merchant'])
-        if learned in flow.bot.CATEGORY_LIST:
+        if learned in flow.bot.CATEGORY_LIST and learned != 'Other':
             decision['category'] = learned
             decision['reason'] = 'Category previously confirmed by you'
         elif not name:
-            decision['category'] = 'Other'
-            decision['reason'] = 'Merchant missing; recorded as Other'
+            decision['action'] = 'review'
+            decision['category'] = None
+            decision['reason'] = 'Needs details: bank alert has no merchant or purchase description'
         else:
             names.append(name)
     categories = await categorize(flow.bot, names)
     for decision in decisions:
         if decision['action'] == 'expense' and not decision['category']:
             decision['category'] = categories[merchant_text(decision['tx']['merchant'])]
-            decision['reason'] = 'GPT-OSS merchant category' + ('; uncertain merchant recorded as Other' if decision['category'] == 'Other' else '')
+            decision['reason'] = 'GPT-OSS merchant category'
+            if decision['category'] == 'Other':
+                decision['action'], decision['category'] = 'review', None
+                decision['reason'] = 'Needs details: merchant could not be categorized confidently'
     flow.db.apply_automatic(owner, decisions)
     log.info('Automatic SMS processing: %s', dict(Counter(d['action'] for d in decisions)))
 
@@ -152,7 +157,9 @@ async def notify(flow, telegram, owner):
     rows = flow.db.automatic_notifications(owner)
     if not rows:
         return
-    approved = [r for r in rows if r['status'] == 'approved']
+    from expense_sheet import INVESTMENTS
+    approved = [r for r in rows if r['status'] == 'approved' and r['category'] not in INVESTMENTS]
+    investments = [r for r in rows if r['status'] == 'approved' and r['category'] in INVESTMENTS]
     counts = Counter(r['status'] for r in rows)
     total = sum(r['amount_paise'] for r in approved) / 100
     lines = [f'Trakos automatic sync: {len(approved)} expense(s) saved — ₹{total:,.2f}']
@@ -173,9 +180,11 @@ async def notify(flow, telegram, owner):
     if historical:
         lines.append(f'{historical} of these may overlap older sheet entries; retained in the ledger without adding to totals.')
     if counts['review']:
-        lines.append(f"{counts['review']} possible duplicate(s) held aside. /review is only needed for these exceptions.")
-    if any(r['category'] == 'Other' for r in approved):
-        lines.append('Unclear merchants are recorded as Other. Use /smscategory ID Category to correct a category.')
+        lines.append(f"{counts['review']} transaction(s) need your details or a duplicate check. Use /review to choose what each was for.")
+    if investments:
+        lines.append(f"Investments saved separately: ₹{sum(r['amount_paise'] for r in investments)/100:,.2f}.")
     lines.append(f'https://docs.google.com/spreadsheets/d/{flow.bot.SHEET_ID}/edit')
     await telegram.send_message(chat_id=owner, text='\n'.join(lines))
+    if counts['review'] and hasattr(flow, 'editor'):
+        await flow.editor.send_pending(telegram, owner)
     flow.db.mark_notified(owner, [r['id'] for r in rows])

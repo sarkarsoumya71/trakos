@@ -96,6 +96,7 @@ class AsyncRegressionTests(unittest.IsolatedAsyncioTestCase):
         ws = MagicMock()
         ws.title = 'September 2026'
         ws.row_count = 200
+        ws.col_count = 12
         ws.get.return_value = [bot.HEADER_ROW,
             ['01/09/2026', '12:00', '450', 'Chai', 'Food'],
             ['30/09/2026', '12:00', '900', 'Future', 'Food']]

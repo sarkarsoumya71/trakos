@@ -18,6 +18,7 @@ from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, Inli
 from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from sms_import import Ledger, MAX_BYTES, fingerprint
+from expense_sheet import sms_id, normalize_row, ensure_layout, HEADERS, data_end_column
 
 log = logging.getLogger('trakos.sms')
 LEDGER_HEADER = ['ID', 'Date', 'Time', 'Amount', 'Direction', 'Bank', 'Account ending',
@@ -29,13 +30,15 @@ COMMAND_MENU = [
     ('today', "Today's purchases and category totals"),
     ('week', 'Spending from Monday through today'),
     ('month', 'Current calendar month from the 1st'),
-    ('others', 'Explain Other expenses; optional: month 2'),
+    ('edit', 'Edit a purchase: /edit then describe the change'),
+    ('review', 'Add descriptions and categories to unclear purchases'),
+    ('breakdown', 'List purchases in a category: /breakdown Subscriptions'),
+    ('others', 'Show purchases that still need details'),
     ('syncsms', 'Import the latest uploaded SMS backup'),
     ('smsstatus', 'Import status and daily report schedule'),
     ('sheet', 'Open your expense sheet'),
     ('smsentry', 'Read a bank alert: /smsentry ID'),
     ('smscategory', 'Correct a category: /smscategory ID Food'),
-    ('review', 'Review exceptional or possible duplicate entries'),
     ('unparsed', 'Show bank alerts not yet understood'),
     ('retrysms', 'Retry syncing saved transactions to the sheet'),
     ('exportledger', 'Download the SMS ledger as a CSV file'),
@@ -73,6 +76,8 @@ class SMSWorkflow:
         self.latest_backup_upload = self.db.get_sync_state('latest_backup_upload')
         self.last_error = None
         self.telegram = None
+        from expense_edit import ExpenseEditor
+        self.editor = ExpenseEditor(self)
 
     @property
     def auto_enabled(self):
@@ -95,7 +100,7 @@ class SMSWorkflow:
         """One process, serialized by lock; a stable marker makes retries idempotent.
 
         Approved rows enter monthly totals after manual or automatic categorization.
-        Existing monthly headers and H:I summaries are preserved.
+        Pending purchases stay visible but outside confirmed totals.
         """
         sh = self.bot.get_spreadsheet()
         try:
@@ -110,20 +115,37 @@ class SMSWorkflow:
         transactions = self.db.list(owner, limit=100000)
         groups = defaultdict(list)
         for tx in transactions:
-            if tx['status'] == 'approved' and not tx['exported']:
+            if tx['status'] in ('exclude','duplicate') and not tx['reason'].startswith('Confirmed by you:'):
+                continue
+            if tx['status'] in ('approved', 'review', 'exclude', 'duplicate') and not tx['exported']:
                 groups[tx['occurred_at'][:7]].append(tx)
         for pending in groups.values():
             monthly = self.bot.get_month_sheet(sh, datetime.fromisoformat(pending[0]['occurred_at']))
-            raw_values = monthly.col_values(7)
+            saved_rows = monthly.get(f'A2:L{monthly.row_count}')
+            positions_month = {row[8]: (i, row) for i, row in enumerate(saved_rows, 2) if len(row) > 8 and row[8]}
             rows = []
+            updates = []
             for tx in pending:
                 marker = self.marker(tx)
-                if any(f'[{marker}]' in str(raw) for raw in raw_values):
+                entry_id = sms_id(marker)
+                existing_month = positions_month.get(entry_id)
+                if tx['status'] in ('exclude','duplicate') and not existing_month:
                     continue
                 stamp = datetime.fromisoformat(tx['occurred_at'])
-                rows.append([stamp.strftime('%d/%m/%Y'), stamp.strftime('%H:%M'), tx['amount_paise'] / 100,
-                    self.bot.to_title_case(tx['merchant'] or f"{tx['bank']} Transaction"), tx['category'], tx['payment'],
-                    f"{self.db.body(tx['id'], owner)}\n[{marker}]"])
+                category = tx['category'] if tx['category'] in self.bot.CATEGORY_LIST else ''
+                description = tx.get('description') or self.bot.to_title_case(tx['merchant'])
+                status = ('Possible duplicate' if 'duplicate' in tx['reason'].lower() else 'Needs details') if tx['status'] == 'review' else {'approved':'Confirmed','exclude':'Excluded','duplicate':'Duplicate'}[tx['status']]
+                if tx['status'] == 'approved' and not category:
+                    status = 'Needs details'
+                row = normalize_row([stamp.strftime('%d/%m/%Y'), stamp.strftime('%H:%M'), tx['amount_paise'] / 100,
+                    description, category, tx['payment'], '', self.db.body(tx['id'], owner), entry_id, status, '', 'SMS'])
+                if existing_month:
+                    row[0] = (stamp.replace(tzinfo=None, hour=0,minute=0,second=0,microsecond=0) - datetime(1899,12,30)).days
+                    updates.append({'range':f'A{existing_month[0]}:L{existing_month[0]}','values':[row]})
+                else:
+                    rows.append(row)
+            if updates:
+                monthly.batch_update(updates, value_input_option='RAW')
             if len(rows) == 1:
                 self.bot.append_to_data_area(monthly, rows[0])
             elif rows:
@@ -164,7 +186,7 @@ class SMSWorkflow:
                     ws = sh.worksheet(name)
                 except gspread.exceptions.WorksheetNotFound:
                     continue
-                for row in ws.get(f'A2:G{ws.row_count}'):
+                for row in ws.get(f'A2:{data_end_column(ws)}{ws.row_count}'):
                     if not row or not row[0]:
                         continue
                     if len(row) < 5:
@@ -177,12 +199,16 @@ class SMSWorkflow:
                         raise ValueError('Invalid existing expense amount')
                     raw = row[6] if len(row) > 6 else ''
                     marker = re.search(r'\[(trakos-sms:[a-f0-9]+)\]', raw)
+                    identity = 'trakos-sms:' + row[8][1:] if len(row) > 8 and row[8].startswith('S') else (marker[1] if marker else None)
+                    if len(row) > 9 and row[9] in ('Excluded','Duplicate'):
+                        continue
                     records.append({'date': stamp.strftime('%Y-%m-%d'), 'amount_paise': int(amount),
-                        'description': row[3], 'category': row[4], 'raw': raw,
-                        'sms_id': markers.get(marker[1]) if marker else None})
+                        'description': row[3], 'category': row[4], 'raw': raw + ('\n' + row[7] if len(row)>7 else ''),
+                        'sms_id': markers.get(identity), 'status':row[9] if len(row)>9 else ''})
         return records
 
     async def complete_sync(self, owner, telegram):
+        await asyncio.to_thread(self.editor.recover_merges)
         if self.auto_enabled:
             from sms_auto import process
             await process(self, owner)
@@ -198,11 +224,11 @@ class SMSWorkflow:
         except gspread.exceptions.WorksheetNotFound:
             return []
         matches = []
-        for index, row in enumerate(ws.get('A2:G'), 2):
+        for index, row in enumerate(ws.get(f'A2:{data_end_column(ws)}{ws.row_count}'), 2):
             try:
-                if row[0] != stamp.strftime('%d/%m/%Y') or abs(float(str(row[2]).replace(',', '')) * 100 - tx['amount_paise']) > 0.1:
+                if row[0] != stamp.strftime('%d/%m/%Y') or abs(float(str(row[2]).replace(',', '').replace('₹','')) * 100 - tx['amount_paise']) > 200:
                     continue
-                if len(row) > 6 and f'[{self.marker(tx)}]' in row[6]:
+                if (len(row) > 8 and row[8] == sms_id(self.marker(tx))) or (len(row) > 6 and f'[{self.marker(tx)}]' in row[6]):
                     continue
                 matches.append(f"row {index}: {row[3]} ({row[4]})")
             except (ValueError, IndexError, TypeError):
@@ -371,6 +397,8 @@ class SMSWorkflow:
                 category_index = int(parts[3])
                 if category_index < 0:
                     raise ValueError('Invalid category')
+                if category_index >= 9:
+                    raise ValueError('This older category menu expired. Open /review for the new choices.')
                 category = self.bot.CATEGORY_LIST[category_index]
                 action = 'expense'
             async with self.lock:
@@ -443,18 +471,10 @@ class SMSWorkflow:
             async with self.lock:
                 def change():
                     tx = self.db.get(tx_id, update.effective_user.id)
-                    if not tx or tx['status'] != 'approved':
-                        raise ValueError('Approved expense not found')
-                    with self.bot.SHEET_LOCK:
-                        if tx['exported']:
-                            sh = self.bot.get_spreadsheet()
-                            ws = sh.worksheet(datetime.fromisoformat(tx['occurred_at']).strftime('%B %Y'))
-                            indices = [i for i, raw in enumerate(ws.col_values(7), 1) if f'[{self.marker(tx)}]' in str(raw)]
-                            if len(indices) != 1:
-                                raise ValueError('Cannot identify the saved expense uniquely')
-                            ws.update(f'E{indices[0]}', [[category]], value_input_option='RAW')
-                        self.db.recategorize(tx_id, update.effective_user.id, category)
-                    self.export_views(update.effective_user.id)
+                    if not tx:
+                        raise ValueError('Expense not found')
+                    record = self.editor.find(sms_id(self.marker(tx)))
+                    self.editor.save(record, record['values'][3], category)
                 await asyncio.to_thread(change)
             await update.message.reply_text(f'SMS #{tx_id}: category changed to {category}. Future expenses at this merchant will use it.')
         except (ValueError, IndexError, StopIteration):
@@ -605,6 +625,7 @@ class SMSWorkflow:
 
     async def start(self, app):
         self.telegram = app.bot
+        await asyncio.to_thread(self.editor.initialize)
         try:
             commands = [BotCommand(name, description) for name, description in COMMAND_MENU]
             await app.bot.set_my_commands(commands)
@@ -629,12 +650,15 @@ class SMSWorkflow:
                 pass
 
     def register(self, app):
-        for command, handler in [('syncsms', self.sync), ('review', self.review),
+        for command, handler in [('syncsms', self.sync), ('review', self.editor.review),
             ('smsstatus', self.status), ('unparsed', self.unparsed), ('smsentry', self.entry),
             ('retrysms', self.retry), ('exportledger', self.export_csv)]:
             app.add_handler(CommandHandler(command, handler))
         app.add_handler(CommandHandler('smscategory', self.change_category))
-        app.add_handler(CommandHandler('others', self.others))
+        app.add_handler(CommandHandler('others', self.editor.review))
+        app.add_handler(CommandHandler('edit', self.editor.edit))
+        app.add_handler(CommandHandler('breakdown', self.editor.breakdown))
+        app.add_handler(CallbackQueryHandler(self.editor.callback, pattern=r'^ex:'))
         app.add_handler(CallbackQueryHandler(self.callback, pattern=r'^sms:'))
         app.add_handler(MessageHandler(filters.Document.ALL, self.upload))
 

@@ -12,6 +12,7 @@ import sys
 import threading
 import secrets
 import asyncio
+from expense_sheet import HEADERS, normalize_row, ensure_layout, ensure_dashboard, format_month, QuotaRetryClient
 from functools import wraps
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -61,7 +62,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-HEADER_ROW = ["Date", "Time", "Amount", "Description", "Category", "Payment Method", "Raw Input"]
+HEADER_ROW = HEADERS
 
 CATEGORY_LIST = [
     "Food",
@@ -73,7 +74,8 @@ CATEGORY_LIST = [
     "Financial Investment",
     "Business Investment",
     "Bills & Utilities",
-    "Other",
+    "Travel & Stay",
+    "Personal Care",
 ]
 
 PAYMENT_METHODS = ["UPI", "CARD1", "CARD2", "CASH", "BANK"]
@@ -82,7 +84,7 @@ PAYMENT_METHODS = ["UPI", "CARD1", "CARD2", "CASH", "BANK"]
 def get_spreadsheet():
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    gc = gspread.authorize(creds)
+    gc = gspread.authorize(creds, http_client=QuotaRetryClient)
     return gc.open_by_key(SHEET_ID)
 
 
@@ -90,38 +92,19 @@ def get_spreadsheet():
 def get_month_sheet(sh, target_date: datetime):
     month_name = target_date.strftime("%B %Y")
     try:
-        return sh.worksheet(month_name)
+        ws = sh.worksheet(month_name)
+        ensure_layout(ws, CATEGORY_LIST)
+        return ws
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = sh.add_worksheet(title=month_name, rows=200, cols=9)
+    ws = sh.add_worksheet(title=month_name, rows=200, cols=12)
 
-    ws.update("A1:G1", [HEADER_ROW])
-    ws.format("A1:G1", {
-        "textFormat": {"bold": True, "fontSize": 10},
-        "backgroundColor": {"red": 0.15, "green": 0.15, "blue": 0.15},
-        "horizontalAlignment": "CENTER",
-    })
-
-    ws.update("H1", [["SUMMARY"]], raw=False)
-    ws.update("H2", [[month_name]], raw=False)
-    ws.update("H3", [["Total Spent:"]], raw=False)
-    ws.update("I3", [['=SUM(C2:C)']], raw=False)
-    ws.update("H4", [["Entries:"]], raw=False)
-    ws.update("I4", [['=COUNTA(A2:A)']], raw=False)
-
-    ws.update("H6", [["BY CATEGORY"]], raw=False)
-    for i, cat in enumerate(CATEGORY_LIST):
-        r = 7 + i
-        ws.update(f"H{r}", [[cat]], raw=False)
-        ws.update(f"I{r}", [[f'=SUMPRODUCT((E$2:E=H{r})*C$2:C)']], raw=False)
-
-    ws.format("H1:H2", {"textFormat": {"bold": True}})
-    ws.format("H3:H4", {"textFormat": {"bold": True}})
-    ws.format("H6", {"textFormat": {"bold": True}})
-    ws.format("I3", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}})
-
+    ws.update('A1:L1', [HEADER_ROW], value_input_option='RAW')
+    format_month(ws, CATEGORY_LIST)
+    ensure_dashboard(sh, ws, CATEGORY_LIST)
     return ws
+
 
 
 @sheet_locked
@@ -131,8 +114,8 @@ def append_to_data_area(ws, row_data):
     if not col_a or col_a[0] != "Date":
         raise ValueError("Expense sheet header is missing")
     next_row = len(col_a) + 1
-    cell_range = f"A{next_row}:G{next_row}"
-    row_data = list(row_data)
+    cell_range = f"A{next_row}:L{next_row}"
+    row_data = normalize_row(row_data)
     date = datetime.strptime(row_data[0], "%d/%m/%Y")
     row_data[0] = (date - datetime(1899, 12, 30)).days
     if next_row > ws.row_count:
@@ -140,7 +123,7 @@ def append_to_data_area(ws, row_data):
     # RAW keeps descriptions and SMS bodies literal, even when they start with '='.
     # Date serials avoid Google Sheets locale-dependent date interpretation.
     ws.format(f"A{next_row}", {"numberFormat": {"type": "DATE", "pattern": "dd/mm/yyyy"}})
-    ws.format(cell_range, {"horizontalAlignment": "CENTER"})
+    ws.format(cell_range, {"horizontalAlignment": "LEFT", "wrapStrategy": "CLIP"})
     ws.update(cell_range, [row_data], value_input_option="RAW")
     
     # Sort data rows by date (column A) ascending
@@ -163,14 +146,14 @@ def append_many_to_data_area(ws, rows):
     start = len(values) + 1
     converted = []
     for source in rows:
-        row = list(source)
+        row = normalize_row(source)
         row[0] = (datetime.strptime(row[0], '%d/%m/%Y') - datetime(1899, 12, 30)).days
         converted.append(row)
     end = start + len(converted) - 1
     if end > ws.row_count:
         ws.add_rows(end - ws.row_count + 100)
     ws.format(f'A{start}:A{end}', {'numberFormat': {'type': 'DATE', 'pattern': 'dd/mm/yyyy'}})
-    ws.update(f'A{start}:G{end}', converted, value_input_option='RAW')
+    ws.update(f'A{start}:L{end}', converted, value_input_option='RAW')
     try:
         sort_month_sheet(ws)
     except Exception as exc:
@@ -200,7 +183,7 @@ def sort_month_sheet(ws):
                     'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd/mm/yyyy'}}}]} for d in dates],
                 'fields': 'userEnteredValue,userEnteredFormat.numberFormat'}},
             {'sortRange': {'range': {'sheetId': ws.id, 'startRowIndex': 1,
-                'endRowIndex': len(values), 'startColumnIndex': 0, 'endColumnIndex': 7},
+                'endRowIndex': len(values), 'startColumnIndex': 0, 'endColumnIndex': 12 if ws.row_values(1)[:12] == HEADERS else 7},
                 'sortSpecs': [{'dimensionIndex': 0, 'sortOrder': 'ASCENDING'}]}}
         ]})
 
@@ -214,7 +197,7 @@ For EACH expense, extract:
 1. amount: The numeric amount in INR. Handle words ("fifteen thousand" = 15000), suffixes ("2.5K" = 2500, "1.5L" = 150000), math ("272+272" = 544). Required.
 2. description: What the expense was for. Clean it up, Title Case. Required.
 3. date: The date of the expense in DD/MM/YYYY format. If not mentioned, set to null (the system will use today). Handle "yesterday", "18th April", "last Monday", etc. Use the year from today's date unless stated otherwise.
-4. category: One of these exact values: Food, Transport, Shopping, Subscriptions, Business, Health, Financial Investment, Business Investment, Bills & Utilities, Other. Pick the best match based on context. If genuinely ambiguous, set to null.
+4. category: One of these exact values: Food, Transport, Shopping, Subscriptions, Business, Health, Financial Investment, Business Investment, Bills & Utilities, Travel & Stay, Personal Care. Pick the best match based on context. If genuinely ambiguous, set to null.
 5. payment: Payment method. One of: UPI, CARD1, CARD2, CASH, BANK. Default to UPI if not mentioned. Look for keywords like "via cash", "using card", "gpay/phonepe/paytm" = UPI.
 
 Today's date is {today}.
@@ -703,7 +686,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "If I can't determine the category, I'll ask you.\n\n"
         "*Commands:*\n"
         "/check — refresh Drive, then show today, week and month\n"
-        "/others — explain this month's Other expenses\n"
+        "/review ? add missing purchase details\n"
+        "/edit ? describe a correction\n"
+        "/breakdown Subscriptions ? see purchases by category\n"
         "/today — today's purchases and categories\n"
         "/week — Monday through today\n"
         "/month — current calendar month, from the 1st\n"
@@ -815,6 +800,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     if not raw or raw.startswith("/"):
         return
+    if SMS_WORKFLOW and await SMS_WORKFLOW.editor.handle_text(update, context):
+        return
     if context.user_data.get("pending_entry"):
         await update.message.reply_text("Choose the category for your pending expense first, or /cancel it. Then resend this message.")
         return
@@ -828,8 +815,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tag == cat_name.lower().replace(" ", "").replace("&", ""):
                 manual_cat = cat_name
                 break
-        if not manual_cat and tag == "other":
-            manual_cat = "Other"
         raw = (raw[:cat_match.start()] + raw[cat_match.end():]).strip().strip(",").strip()
 
     # Try Groq LLM first (returns list)
@@ -942,6 +927,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.pop("pending_entry", None)
     context.user_data.pop("pending_queue", None)
+    context.user_data.pop("expense_edit", None)
+    context.user_data.pop("edit_suggestion", None)
+    context.user_data.pop("expense_proposal", None)
     await update.message.reply_text("Pending manual entries cancelled. Already saved expenses are unchanged.")
 
 
