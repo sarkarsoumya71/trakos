@@ -103,9 +103,9 @@ class ExpenseEditor:
                 ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
                 self.flow.db.set_sync_state('cleanup:' + plan['id'], '1')
             self.recover_merges()
-            if not self.flow.db.get_sync_state('inline-dashboard-v1:' + ws.title):
+            if not self.flow.db.get_sync_state('single-ledger-dashboard-v2:' + ws.title):
                 ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
-                self.flow.db.set_sync_state('inline-dashboard-v1:' + ws.title, '1')
+                self.flow.db.set_sync_state('single-ledger-dashboard-v2:' + ws.title, '1')
 
     def cleanup_action(self, action):
         records = self.records(action['month'])

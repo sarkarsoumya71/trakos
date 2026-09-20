@@ -147,8 +147,8 @@ def ensure_dashboard(sh, ws, categories):
     for i, cat in enumerate(expense_cats, 12):
         values.append([cat, f'=SUMIFS(C2:C,E2:E,N{i},J2:J,"Confirmed",K2:K,"Expense")'])
     ws.update(range_name='N1:O'+str(len(values)), values=values, value_input_option='USER_ENTERED')
-    query = '=IFERROR(QUERY(A1:L,"select A,B,C,D,J where A is not null and J <> \'Excluded\' and J <> \'Duplicate\'"&IF(O2="All categories",""," and E = \'"&O2&"\'")&" label D \'Purchase\'",1),"No matching transactions")'
-    ws.update(range_name='Q21:Q22', values=[['Matches'], [query]], value_input_option='USER_ENTERED')
+    # Remove only the old generated mirror, not unrelated notes in this area.
+    old_matches = ws.get('Q21:Q22', value_render_option='FORMULA')
     metadata = sh.fetch_sheet_metadata({'fields':'sheets(properties(sheetId),charts(chartId,spec(title)),conditionalFormats,columnGroups)'})
     current = next(s for s in metadata['sheets'] if s['properties']['sheetId'] == ws.id)
     requests = [
@@ -157,13 +157,16 @@ def ensure_dashboard(sh, ws, categories):
         {'repeatCell': {'range': {'sheetId':ws.id,'startColumnIndex':13,'endColumnIndex':24}, 'cell':{'userEnteredFormat':{'textFormat':{'fontFamily':'Arial','fontSize':10},'wrapStrategy':'CLIP'}},'fields':'userEnteredFormat.textFormat,userEnteredFormat.wrapStrategy'}},
         {'repeatCell': {'range': {'sheetId':ws.id,'startRowIndex':1,'endRowIndex':2,'startColumnIndex':14,'endColumnIndex':15}, 'cell':{'userEnteredFormat':{'backgroundColor':{'red':.83,'green':.93,'blue':1},'textFormat':{'bold':True}}},'fields':'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold'}},
     ]
-    for row, start, end in [(0,13,15),(10,13,15),(20,16,21),(21,16,21)]:
+    if (len(old_matches) == 2 and old_matches[0] and old_matches[1]
+            and old_matches[0][0] in ('Matches', 'Selected category transactions')
+            and str(old_matches[1][0]).startswith('=IFERROR(QUERY(A1:L,')):
+        requests.append({'updateCells': {'range': {'sheetId':ws.id,'startRowIndex':20,'endRowIndex':22,'startColumnIndex':16,'endColumnIndex':21},'rows':[],'fields':'userEnteredValue,userEnteredFormat'}})
+    for row, start, end in [(0,13,15),(10,13,15)]:
         requests.append({'repeatCell': {'range':{'sheetId':ws.id,'startRowIndex':row,'endRowIndex':row+1,'startColumnIndex':start,'endColumnIndex':end},'cell':{'userEnteredFormat':{'backgroundColor':{'red':.93,'green':.93,'blue':.93},'textFormat':{'bold':True}}},'fields':'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold'}})
     for start,end,width in [(12,13,24),(13,14,270),(14,15,170),(15,16,24),(16,17,105),(17,18,70),(18,19,110),(19,20,240),(20,21,145),(21,24,80)]:
         requests.append({'updateDimensionProperties': {'range':{'sheetId':ws.id,'dimension':'COLUMNS','startIndex':start,'endIndex':end},'properties':{'pixelSize':width},'fields':'pixelSize'}})
-    for col, start_row in [(14,4),(18,22)]:
+    for col, start_row in [(14,4)]:
         requests.append({'repeatCell':{'range':{'sheetId':ws.id,'startRowIndex':start_row,'startColumnIndex':col,'endColumnIndex':col+1},'cell':{'userEnteredFormat':{'numberFormat':{'type':'NUMBER','pattern':'"\u20b9"#,##0.00'}}},'fields':'userEnteredFormat.numberFormat'}})
-    requests.append({'repeatCell':{'range':{'sheetId':ws.id,'startRowIndex':22,'startColumnIndex':16,'endColumnIndex':17},'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE','pattern':'dd/mm/yyyy'}}},'fields':'userEnteredFormat.numberFormat'}})
     group_range = {'sheetId':ws.id,'dimension':'COLUMNS','startIndex':6,'endIndex':12}
     if not any(g['range'].get('startIndex')==6 and g['range'].get('endIndex')==12 for g in current.get('columnGroups',[])):
         requests += [{'addDimensionGroup':{'range':group_range}},
@@ -183,9 +186,10 @@ def ensure_dashboard(sh, ws, categories):
         'pieChart':{'legendPosition':'RIGHT_LEGEND','pieHole':.45,
         'domain':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':13,'endColumnIndex':14}]}},
         'series':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':14,'endColumnIndex':15}]}}}}
-    position = {'overlayPosition':{'anchorCell':{'sheetId':ws.id,'rowIndex':1,'columnIndex':16},'widthPixels':680,'heightPixels':480}}
+    # One overview column beside the ledger: totals above, compact chart below.
+    position = {'overlayPosition':{'anchorCell':{'sheetId':ws.id,'rowIndex':22,'columnIndex':13},'widthPixels':440,'heightPixels':360}}
     if chart:
-        requests += [{'updateChartSpec':{'chartId':chart['chartId'],'spec':spec}}, {'updateEmbeddedObjectPosition':{'objectId':chart['chartId'],'newPosition':position,'fields':'overlayPosition'}}]
+        requests += [{'updateChartSpec':{'chartId':chart['chartId'],'spec':spec}}, {'updateEmbeddedObjectPosition':{'objectId':chart['chartId'],'newPosition':position,'fields':'*'}}]
     else:
         requests.append({'addChart':{'chart':{'spec':spec,'position':position}}})
     sh.batch_update({'requests':requests})

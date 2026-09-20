@@ -32,6 +32,7 @@ class LayoutTests(unittest.TestCase):
         ws=MagicMock(id=123,col_count=24,row_count=200)
         ws.title='September 2026'
         ws.acell.return_value.value='Business'
+        ws.get.return_value=[['Matches'],['=IFERROR(QUERY(A1:L,"select A",1),"")']]
         sh.fetch_sheet_metadata.return_value={'sheets':[{'properties':{'sheetId':123},
             'charts':[{'chartId':9,'spec':{'title':'September 2026 - confirmed spending'}}],
             'conditionalFormats':[{'booleanRule':{'condition':{'values':[{'userEnteredValue':HIGHLIGHT_FORMULA}]}}}],
@@ -40,12 +41,19 @@ class LayoutTests(unittest.TestCase):
         sh.add_worksheet.assert_not_called()
         sh.worksheet.assert_not_called()
         self.assertEqual(ws.update.call_args_list[0].kwargs['values'][1][1],'Business')
-        self.assertTrue(all(c.kwargs['range_name'].startswith(('N','Q')) for c in ws.update.call_args_list))
+        self.assertTrue(all(c.kwargs['range_name'].startswith('N') for c in ws.update.call_args_list))
         requests=sh.batch_update.call_args.args[0]['requests']
         self.assertFalse(any('addChart' in r or 'addDimensionGroup' in r or 'addConditionalFormatRule' in r for r in requests))
         highlight=next(r['updateConditionalFormatRule']['rule'] for r in requests if 'updateConditionalFormatRule' in r)
         self.assertEqual(highlight['ranges'][0]['sheetId'],ws.id)
         self.assertIn('$E2=$O$2',highlight['booleanRule']['condition']['values'][0]['userEnteredValue'])
+        cleared=next(r['updateCells']['range'] for r in requests if 'updateCells' in r)
+        self.assertEqual((cleared['startColumnIndex'],cleared['endColumnIndex']),(16,21))
+        position=next(r['updateEmbeddedObjectPosition']['newPosition']['overlayPosition'] for r in requests if 'updateEmbeddedObjectPosition' in r)
+        self.assertEqual(position['anchorCell'],{'sheetId':123,'rowIndex':22,'columnIndex':13})
+        ws.get.return_value=[['My notes'],['Keep this']]
+        ensure_dashboard(sh,ws,bot.CATEGORY_LIST)
+        self.assertFalse(any('updateCells' in r for r in sh.batch_update.call_args.args[0]['requests']))
     def test_currency_format_does_not_accept_invalid_characters(self):
         from expense_sheet import paise
         self.assertEqual(paise('\u20b91,234.50'),123450)
