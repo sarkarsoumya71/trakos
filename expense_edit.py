@@ -103,6 +103,9 @@ class ExpenseEditor:
                 ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
                 self.flow.db.set_sync_state('cleanup:' + plan['id'], '1')
             self.recover_merges()
+            if not self.flow.db.get_sync_state('inline-dashboard-v1:' + ws.title):
+                ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
+                self.flow.db.set_sync_state('inline-dashboard-v1:' + ws.title, '1')
 
     def cleanup_action(self, action):
         records = self.records(action['month'])
@@ -190,7 +193,8 @@ class ExpenseEditor:
             if category:
                 requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':4}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':category}}]}], 'fields':'userEnteredValue'}})
                 requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':9}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':'Confirmed'}},{'userEnteredValue':{'stringValue':'Investment' if category in INVESTMENTS else 'Expense'}}]}], 'fields':'userEnteredValue'}})
-            requests.append({'deleteDimension': {'range': {'sheetId':ws.id,'dimension':'ROWS','startIndex':left['row']-1,'endIndex':left['row']}}})
+            # Shift only transaction cells; the monthly overview occupies N:X.
+            requests.append({'deleteRange': {'range': {'sheetId':ws.id,'startRowIndex':left['row']-1,'endRowIndex':left['row'], 'startColumnIndex':0,'endColumnIndex':12}, 'shiftDimension':'ROWS'}})
             ws.spreadsheet.batch_update({'requests':requests})
             self.flow.db.set_sync_state(job_key, 'done')
 

@@ -125,43 +125,70 @@ def format_month(ws, categories):
     ws.spreadsheet.batch_update({'requests': requests})
 
 
+HIGHLIGHT_FORMULA = '=AND($O$2<>"All categories",$O$2<>"",$E2=$O$2,$A2<>"",$J2<>"Excluded",$J2<>"Duplicate")'
+
+
 def ensure_dashboard(sh, ws, categories):
-    title = ws.title + ' Overview'
-    try:
-        dash = sh.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
-        dash = sh.add_worksheet(title=title, rows=max(200, ws.row_count), cols=13)
-    ref = "'" + ws.title.replace("'", "''") + "'!"
+    """Keep formulas, category selector and chart beside this month's A:L ledger."""
+    if ws.col_count < 24:
+        ws.resize(cols=24)
+    selected = ws.acell('O2').value
+    if selected not in categories + ['All categories']:
+        selected = 'All categories'
     expense_cats = [c for c in categories if c not in INVESTMENTS]
-    values = [[ws.title + ' spending', 'Amount'], ['Confirmed spending', f'=SUMIFS({ref}C2:C,{ref}J2:J,"Confirmed",{ref}K2:K,"Expense")'],
-              ['Needs details', f'=SUMIF({ref}J2:J,"Needs details",{ref}C2:C)'],
-              ['Possible duplicates (not counted)', f'=SUMIF({ref}J2:J,"Possible duplicate",{ref}C2:C)'],
-              ['Investments (outside spending)', f'=SUMIFS({ref}C2:C,{ref}K2:K,"Investment",{ref}J2:J,"Confirmed")'],
-              ['', ''], ['Category', 'Confirmed spending']]
-    for i, cat in enumerate(expense_cats, 8):
-        values.append([cat, f'=SUMIFS({ref}C2:C,{ref}E2:E,A{i},{ref}J2:J,"Confirmed",{ref}K2:K,"Expense")'])
-    dash.update('A1:B' + str(len(values)), values, value_input_option='USER_ENTERED')
-    dash.update('D1:E3', [['Explore a category', 'Subscriptions'], ['Total in this category', f'=SUMIFS({ref}C2:C,{ref}E2:E,E1,{ref}J2:J,"Confirmed")'], ['Only confirmed entries appear below', '']], value_input_option='USER_ENTERED')
-    dash.update('D5', [[f'=IFERROR(QUERY({ref}A1:L,"select D,sum(C) where E = \'"&E1&"\' and J = \'Confirmed\' group by D label D \'Purchase / service\',sum(C) \'Amount\'",1),"No confirmed entries")']], value_input_option='USER_ENTERED')
+    values = [[ws.title + ' overview', 'Amount'], ['Highlight category', selected],
+        ['Matching rows are highlighted', ''], ['', ''],
+        ['Confirmed spending', '=SUMIFS(C2:C,J2:J,"Confirmed",K2:K,"Expense")'],
+        ['Needs details', '=SUMIF(J2:J,"Needs details",C2:C)'],
+        ['Possible duplicates (not counted)', '=SUMIF(J2:J,"Possible duplicate",C2:C)'],
+        ['Investments (outside spending)', '=SUMIFS(C2:C,K2:K,"Investment",J2:J,"Confirmed")'],
+        ['Selected category: confirmed', '=IF(O2="All categories",O5,SUMIFS(C2:C,E2:E,O2,J2:J,"Confirmed"))'],
+        ['', ''], ['Category', 'Confirmed spending']]
+    for i, cat in enumerate(expense_cats, 12):
+        values.append([cat, f'=SUMIFS(C2:C,E2:E,N{i},J2:J,"Confirmed",K2:K,"Expense")'])
+    ws.update(range_name='N1:O'+str(len(values)), values=values, value_input_option='USER_ENTERED')
+    query = '=IFERROR(QUERY(A1:L,"select A,B,C,D,J where A is not null and J <> \'Excluded\' and J <> \'Duplicate\'"&IF(O2="All categories",""," and E = \'"&O2&"\'")&" label D \'Purchase\'",1),"No matching transactions")'
+    ws.update(range_name='Q21:Q22', values=[['Selected category transactions'], [query]], value_input_option='USER_ENTERED')
+    metadata = sh.fetch_sheet_metadata({'fields':'sheets(properties(sheetId),charts(chartId,spec(title)),conditionalFormats,columnGroups)'})
+    current = next(s for s in metadata['sheets'] if s['properties']['sheetId'] == ws.id)
     requests = [
-        {'setDataValidation': {'range': {'sheetId': dash.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 4, 'endColumnIndex': 5}, 'rule': {'condition': {'type': 'ONE_OF_LIST', 'values': [{'userEnteredValue': c} for c in categories]}, 'strict': True, 'showCustomUi': True}}},
-        {'repeatCell': {'range': {'sheetId': dash.id, 'endRowIndex': 1, 'endColumnIndex': 5}, 'cell': {'userEnteredFormat': {'backgroundColor': {'red': .93, 'green': .93, 'blue': .93}, 'textFormat': {'bold': True}}}, 'fields': 'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat'}},
-        {'updateDimensionProperties': {'range': {'sheetId': dash.id, 'dimension': 'COLUMNS', 'endIndex': 5}, 'properties': {'pixelSize': 200}, 'fields': 'pixelSize'}},
-        {'updateDimensionProperties': {'range': {'sheetId': dash.id, 'dimension': 'COLUMNS', 'startIndex': 0, 'endIndex': 1}, 'properties': {'pixelSize': 280}, 'fields': 'pixelSize'}},
+        {'setDataValidation': {'range': {'sheetId':ws.id,'startRowIndex':1,'endRowIndex':2,'startColumnIndex':14,'endColumnIndex':15},
+            'rule': {'condition': {'type':'ONE_OF_LIST','values':[{'userEnteredValue':c} for c in ['All categories']+categories]},'strict':True,'showCustomUi':True}}},
+        {'repeatCell': {'range': {'sheetId':ws.id,'startColumnIndex':13,'endColumnIndex':24}, 'cell':{'userEnteredFormat':{'textFormat':{'fontFamily':'Arial','fontSize':10},'wrapStrategy':'CLIP'}},'fields':'userEnteredFormat.textFormat,userEnteredFormat.wrapStrategy'}},
+        {'repeatCell': {'range': {'sheetId':ws.id,'startRowIndex':1,'endRowIndex':2,'startColumnIndex':14,'endColumnIndex':15}, 'cell':{'userEnteredFormat':{'backgroundColor':{'red':.83,'green':.93,'blue':1},'textFormat':{'bold':True}}},'fields':'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold'}},
     ]
-    for col in (1, 4):
-        requests.append({'repeatCell': {'range': {'sheetId': dash.id, 'startRowIndex': 1, 'startColumnIndex': col, 'endColumnIndex': col+1}, 'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '"₹"#,##0.00'}}}, 'fields': 'userEnteredFormat.numberFormat'}})
-    meta = sh.fetch_sheet_metadata({'fields': 'sheets(properties(sheetId),charts(chartId))'})
-    charts = next((s.get('charts', []) for s in meta['sheets'] if s['properties']['sheetId'] == dash.id), [])
-    spec = {'title': ws.title + ' — confirmed spending', 'subtitle': 'Investments and entries awaiting details are shown separately', 'fontName': 'Arial', 'pieChart': {
-        'legendPosition': 'RIGHT_LEGEND', 'pieHole': .45,
-        'domain': {'sourceRange': {'sources': [{'sheetId': dash.id, 'startRowIndex': 7, 'endRowIndex': len(values), 'startColumnIndex': 0, 'endColumnIndex': 1}]}},
-        'series': {'sourceRange': {'sources': [{'sheetId': dash.id, 'startRowIndex': 7, 'endRowIndex': len(values), 'startColumnIndex': 1, 'endColumnIndex': 2}]}}}}
-    if not charts:
-        requests.append({'addChart': {'chart': {'spec': spec, 'position': {'overlayPosition': {'anchorCell': {'sheetId': dash.id, 'rowIndex': 1, 'columnIndex': 6}, 'widthPixels': 700, 'heightPixels': 430}}}}})
+    for row, start, end in [(0,13,15),(10,13,15),(20,16,21),(21,16,21)]:
+        requests.append({'repeatCell': {'range':{'sheetId':ws.id,'startRowIndex':row,'endRowIndex':row+1,'startColumnIndex':start,'endColumnIndex':end},'cell':{'userEnteredFormat':{'backgroundColor':{'red':.93,'green':.93,'blue':.93},'textFormat':{'bold':True}}},'fields':'userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold'}})
+    for start,end,width in [(12,13,24),(13,14,270),(14,15,170),(15,16,24),(16,17,105),(17,18,70),(18,19,110),(19,20,240),(20,21,145),(21,24,80)]:
+        requests.append({'updateDimensionProperties': {'range':{'sheetId':ws.id,'dimension':'COLUMNS','startIndex':start,'endIndex':end},'properties':{'pixelSize':width},'fields':'pixelSize'}})
+    for col, start_row in [(14,4),(18,22)]:
+        requests.append({'repeatCell':{'range':{'sheetId':ws.id,'startRowIndex':start_row,'startColumnIndex':col,'endColumnIndex':col+1},'cell':{'userEnteredFormat':{'numberFormat':{'type':'NUMBER','pattern':'"\u20b9"#,##0.00'}}},'fields':'userEnteredFormat.numberFormat'}})
+    requests.append({'repeatCell':{'range':{'sheetId':ws.id,'startRowIndex':22,'startColumnIndex':16,'endColumnIndex':17},'cell':{'userEnteredFormat':{'numberFormat':{'type':'DATE','pattern':'dd/mm/yyyy'}}},'fields':'userEnteredFormat.numberFormat'}})
+    group_range = {'sheetId':ws.id,'dimension':'COLUMNS','startIndex':6,'endIndex':12}
+    if not any(g['range'].get('startIndex')==6 and g['range'].get('endIndex')==12 for g in current.get('columnGroups',[])):
+        requests += [{'addDimensionGroup':{'range':group_range}},
+            {'updateDimensionGroup':{'dimensionGroup':{'range':group_range,'depth':1,'collapsed':True},'fields':'collapsed'}},
+            {'updateDimensionProperties':{'range':group_range,'properties':{'hiddenByUser':True},'fields':'hiddenByUser'}}]
+    rule = {'ranges':[{'sheetId':ws.id,'startRowIndex':1,'startColumnIndex':0,'endColumnIndex':12}],
+        'booleanRule':{'condition':{'type':'CUSTOM_FORMULA','values':[{'userEnteredValue':HIGHLIGHT_FORMULA}]},
+        'format':{'backgroundColor':{'red':.83,'green':.93,'blue':1},'textFormat':{'bold':True}}}}
+    old_rule = next((i for i,r in enumerate(current.get('conditionalFormats',[])) if r.get('booleanRule',{}).get('condition',{}).get('values')==[{'userEnteredValue':HIGHLIGHT_FORMULA}]),None)
+    if old_rule is None:
+        requests.append({'addConditionalFormatRule':{'rule':rule,'index':0}})
     else:
-        requests.append({'updateChartSpec': {'chartId': charts[0]['chartId'], 'spec': spec}})
-    sh.batch_update({'requests': requests})
+        requests.append({'updateConditionalFormatRule':{'sheetId':ws.id,'index':old_rule,'rule':rule}})
+    title = ws.title + ' - confirmed spending'
+    chart = next((c for c in current.get('charts',[]) if c.get('spec',{}).get('title')==title),None)
+    spec = {'title':title,'subtitle':'Pending purchases and investments shown separately','fontName':'Arial',
+        'pieChart':{'legendPosition':'RIGHT_LEGEND','pieHole':.45,
+        'domain':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':13,'endColumnIndex':14}]}},
+        'series':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':14,'endColumnIndex':15}]}}}}
+    position = {'overlayPosition':{'anchorCell':{'sheetId':ws.id,'rowIndex':1,'columnIndex':16},'widthPixels':680,'heightPixels':480}}
+    if chart:
+        requests += [{'updateChartSpec':{'chartId':chart['chartId'],'spec':spec}}, {'updateEmbeddedObjectPosition':{'objectId':chart['chartId'],'newPosition':position,'fields':'overlayPosition'}}]
+    else:
+        requests.append({'addChart':{'chart':{'spec':spec,'position':position}}})
+    sh.batch_update({'requests':requests})
 
 
 def data_end_column(ws):
