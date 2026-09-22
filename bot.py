@@ -693,6 +693,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/check — refresh Drive, then show today, week and month\n"
         "/review - add missing purchase details\n"
         "/edit - describe a correction\n"
+        "/return - return or refund a purchase\n"
+        "/returns - track refunds or undo a return\n"
         "/breakdown Subscriptions - see purchases by category\n"
         "/today — today's purchases and categories\n"
         "/week — Monday through today\n"

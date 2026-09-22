@@ -23,6 +23,8 @@ HEADERS = ['Date', 'Time', 'Amount', 'Description', 'Category', 'Payment Method'
            'Raw Input', 'Bank Message', 'Entry ID', 'Status', 'Treatment', 'Source']
 INVESTMENTS = {'Financial Investment', 'Business Investment'}
 EXCLUDED = {'Excluded', 'Duplicate'}
+RETURN_STATUSES = {'Return pending', 'Refunded'}
+SPENDING_STATUSES = {'Confirmed', 'Return pending'}
 
 
 def paise(value):
@@ -56,7 +58,7 @@ def normalize_row(source):
 
 
 def needs_review(row):
-    return row[9] not in EXCLUDED and (not row[4] or row[9] in ('Needs details', 'Possible duplicate'))
+    return row[9] not in EXCLUDED | RETURN_STATUSES and (not row[4] or row[9] in ('Needs details', 'Possible duplicate'))
 
 
 def near_manual_matches(tx, records):
@@ -138,14 +140,17 @@ def ensure_dashboard(sh, ws, categories):
     expense_cats = [c for c in categories if c not in INVESTMENTS]
     values = [[ws.title + ' overview', 'Amount'], ['Highlight category', selected],
         ['Matching rows are highlighted', ''], ['', ''],
-        ['Confirmed spending', '=SUMIFS(C2:C,J2:J,"Confirmed",K2:K,"Expense")'],
+        ['Spending after refunds', '=SUMIFS(C2:C,J2:J,"Confirmed",K2:K,"Expense")+SUMIFS(C2:C,J2:J,"Return pending",K2:K,"Expense")'],
         ['Needs details', '=SUMIF(J2:J,"Needs details",C2:C)'],
         ['Possible duplicates (not counted)', '=SUMIF(J2:J,"Possible duplicate",C2:C)'],
         ['Investments (outside spending)', '=SUMIFS(C2:C,K2:K,"Investment",J2:J,"Confirmed")'],
-        ['Selected category: confirmed', '=IF(O2="All categories",O5,SUMIFS(C2:C,E2:E,O2,J2:J,"Confirmed"))'],
-        ['', ''], ['Category', 'Confirmed spending']]
+        ['Selected category: spending', '=IF(O2="All categories",O5,SUMIFS(C2:C,E2:E,O2,J2:J,"Confirmed")+SUMIFS(C2:C,E2:E,O2,J2:J,"Return pending"))'],
+        ['', ''], ['Category', 'Spending after refunds']]
     for i, cat in enumerate(expense_cats, 12):
-        values.append([cat, f'=SUMIFS(C2:C,E2:E,N{i},J2:J,"Confirmed",K2:K,"Expense")'])
+        values.append([cat, f'=SUMIFS(C2:C,E2:E,N{i},J2:J,"Confirmed",K2:K,"Expense")+SUMIFS(C2:C,E2:E,N{i},J2:J,"Return pending",K2:K,"Expense")'])
+    category_end = len(values)
+    values += [['Refund pending (still included)', '=SUMIF(J2:J,"Return pending",C2:C)'],
+               ['Refunded (not counted)', '=SUMIF(J2:J,"Refunded",C2:C)']]
     ws.update(range_name='N1:O'+str(len(values)), values=values, value_input_option='USER_ENTERED')
     # Remove only the old generated mirror, not unrelated notes in this area.
     old_matches = ws.get('Q21:Q22', value_render_option='FORMULA')
@@ -180,14 +185,14 @@ def ensure_dashboard(sh, ws, categories):
         requests.append({'addConditionalFormatRule':{'rule':rule,'index':0}})
     else:
         requests.append({'updateConditionalFormatRule':{'sheetId':ws.id,'index':old_rule,'rule':rule}})
-    title = ws.title + ' - confirmed spending'
-    chart = next((c for c in current.get('charts',[]) if c.get('spec',{}).get('title')==title),None)
-    spec = {'title':title,'subtitle':'Pending purchases and investments shown separately','fontName':'Arial',
+    title = ws.title + ' - spending after refunds'
+    chart = next((c for c in current.get('charts',[]) if c.get('spec',{}).get('title') in (title, ws.title + ' - confirmed spending')),None)
+    spec = {'title':title,'subtitle':'Refunds received excluded; pending refunds still included','fontName':'Arial',
         'pieChart':{'legendPosition':'RIGHT_LEGEND','pieHole':.45,
-        'domain':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':13,'endColumnIndex':14}]}},
-        'series':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':len(values),'startColumnIndex':14,'endColumnIndex':15}]}}}}
+        'domain':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':category_end,'startColumnIndex':13,'endColumnIndex':14}]}},
+        'series':{'sourceRange':{'sources':[{'sheetId':ws.id,'startRowIndex':11,'endRowIndex':category_end,'startColumnIndex':14,'endColumnIndex':15}]}}}}
     # One overview column beside the ledger: totals above, compact chart below.
-    position = {'overlayPosition':{'anchorCell':{'sheetId':ws.id,'rowIndex':22,'columnIndex':13},'widthPixels':440,'heightPixels':360}}
+    position = {'overlayPosition':{'anchorCell':{'sheetId':ws.id,'rowIndex':len(values)+1,'columnIndex':13},'widthPixels':440,'heightPixels':360}}
     if chart:
         requests += [{'updateChartSpec':{'chartId':chart['chartId'],'spec':spec}}, {'updateEmbeddedObjectPosition':{'objectId':chart['chartId'],'newPosition':position,'fields':'*'}}]
     else:

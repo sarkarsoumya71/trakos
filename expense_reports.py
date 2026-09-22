@@ -2,7 +2,7 @@
 from collections import Counter
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from expense_sheet import INVESTMENTS, EXCLUDED, data_end_column
+from expense_sheet import INVESTMENTS, EXCLUDED, SPENDING_STATUSES, data_end_column
 
 
 def clean(text, limit=60):
@@ -61,7 +61,7 @@ def read_spending(bot, now):
     periods = {}
     for key, start in starts.items():
         all_selected = [row for row in entries if start <= row['date'] <= now.date() and row['status'] not in EXCLUDED]
-        selected = [row for row in all_selected if row['status']=='Confirmed' and row['treatment']!='Investment']
+        selected = [row for row in all_selected if row['status'] in SPENDING_STATUSES and row['treatment']!='Investment']
         categories = Counter()
         for row in selected:
             categories[row['category']] += row['paise']
@@ -69,6 +69,8 @@ def read_spending(bot, now):
                         'count': len(selected), 'categories': categories, 'entries': selected,
                         'pending':sum(row['paise'] for row in all_selected if row['status']=='Needs details'),
                         'possible_duplicates':sum(row['paise'] for row in all_selected if row['status']=='Possible duplicate'),
+                        'return_pending':sum(row['paise'] for row in all_selected if row['status']=='Return pending'),
+                        'refunded':sum(row['paise'] for row in all_selected if row['status']=='Refunded'),
                         'investments':sum(row['paise'] for row in all_selected if row['status']=='Confirmed' and row['treatment']=='Investment')}
     return {'as_of': now, 'periods': periods}
 
@@ -92,6 +94,10 @@ def render(snapshot, period=None, freshness='', nightly=False):
             lines.append(f"  Possible duplicates held aside: {money(data['possible_duplicates'])}")
         if data.get('investments'):
             lines.append(f"  Investments (separate): {money(data['investments'])}")
+        if data.get('return_pending'):
+            lines.append(f"  Refund pending (still included): {money(data['return_pending'])} — /returns")
+        if data.get('refunded'):
+            lines.append(f"  Refunded purchases (not counted): {money(data['refunded'])}")
         if len(categories) > 10:
             lines.append(f"  Remaining categories: {money(sum(v for _, v in categories[10:]))}")
         if not data['count']:
