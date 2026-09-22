@@ -31,6 +31,8 @@ COMMAND_MENU = [
     ('week', 'Spending from Monday through today'),
     ('month', 'Current calendar month from the 1st'),
     ('edit', 'Edit a purchase: /edit then describe the change'),
+    ('return', 'Find a purchase to return, refund or restore'),
+    ('returns', 'Track pending and received refunds'),
     ('review', 'Add descriptions and categories to unclear purchases'),
     ('breakdown', 'List purchases in a category: /breakdown Subscriptions'),
     ('others', 'Show purchases that still need details'),
@@ -117,7 +119,7 @@ class SMSWorkflow:
         for tx in transactions:
             if tx['status'] in ('exclude','duplicate') and not tx['reason'].startswith('Confirmed by you:'):
                 continue
-            if tx['status'] in ('approved', 'review', 'exclude', 'duplicate') and not tx['exported']:
+            if tx['status'] in ('approved', 'review', 'exclude', 'duplicate', 'return_pending', 'refunded') and not tx['exported']:
                 groups[tx['occurred_at'][:7]].append(tx)
         for pending in groups.values():
             monthly = self.bot.get_month_sheet(sh, datetime.fromisoformat(pending[0]['occurred_at']))
@@ -134,7 +136,7 @@ class SMSWorkflow:
                 stamp = datetime.fromisoformat(tx['occurred_at'])
                 category = tx['category'] if tx['category'] in self.bot.CATEGORY_LIST else ''
                 description = tx.get('description') or self.bot.to_title_case(tx['merchant'])
-                status = ('Possible duplicate' if 'duplicate' in tx['reason'].lower() else 'Needs details') if tx['status'] == 'review' else {'approved':'Confirmed','exclude':'Excluded','duplicate':'Duplicate'}[tx['status']]
+                status = ('Possible duplicate' if 'duplicate' in tx['reason'].lower() else 'Needs details') if tx['status'] == 'review' else {'approved':'Confirmed','exclude':'Excluded','duplicate':'Duplicate','return_pending':'Return pending','refunded':'Refunded'}[tx['status']]
                 if tx['status'] == 'approved' and not category:
                     status = 'Needs details'
                 row = normalize_row([stamp.strftime('%d/%m/%Y'), stamp.strftime('%H:%M'), tx['amount_paise'] / 100,
@@ -657,6 +659,8 @@ class SMSWorkflow:
         app.add_handler(CommandHandler('smscategory', self.change_category))
         app.add_handler(CommandHandler('others', self.editor.review))
         app.add_handler(CommandHandler('edit', self.editor.edit))
+        app.add_handler(CommandHandler('return', self.editor.return_purchase))
+        app.add_handler(CommandHandler('returns', self.editor.returns))
         app.add_handler(CommandHandler('breakdown', self.editor.breakdown))
         app.add_handler(CallbackQueryHandler(self.editor.callback, pattern=r'^ex:'))
         app.add_handler(CallbackQueryHandler(self.callback, pattern=r'^sms:'))

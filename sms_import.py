@@ -401,7 +401,7 @@ class Ledger:
                            (owner, tx['bank'], tx['merchant'].casefold(), category))
 
     def edit_details(self, tx_id, owner, description, category, status='approved'):
-        if status not in ('approved', 'review', 'exclude', 'duplicate'):
+        if status not in ('approved', 'review', 'exclude', 'duplicate', 'return_pending', 'refunded'):
             raise ValueError('Invalid status')
         with self.connect() as db:
             tx = db.execute('SELECT * FROM transactions WHERE id=? AND owner=?', (tx_id, owner)).fetchone()

@@ -50,7 +50,13 @@ class LayoutTests(unittest.TestCase):
         cleared=next(r['updateCells']['range'] for r in requests if 'updateCells' in r)
         self.assertEqual((cleared['startColumnIndex'],cleared['endColumnIndex']),(16,21))
         position=next(r['updateEmbeddedObjectPosition']['newPosition']['overlayPosition'] for r in requests if 'updateEmbeddedObjectPosition' in r)
-        self.assertEqual(position['anchorCell'],{'sheetId':123,'rowIndex':22,'columnIndex':13})
+        self.assertEqual(position['anchorCell'],{'sheetId':123,'rowIndex':23,'columnIndex':13})
+        values=ws.update.call_args_list[0].kwargs['values']
+        self.assertIn('Return pending', values[4][1])
+        self.assertIn('Return pending', values[11][1])
+        self.assertEqual(values[-1][0], 'Refunded (not counted)')
+        chart=next(r['updateChartSpec']['spec'] for r in requests if 'updateChartSpec' in r)
+        self.assertEqual(chart['pieChart']['series']['sourceRange']['sources'][0]['endRowIndex'],20)
         ws.get.return_value=[['My notes'],['Keep this']]
         ensure_dashboard(sh,ws,bot.CATEGORY_LIST)
         self.assertFalse(any('updateCells' in r for r in sh.batch_update.call_args.args[0]['requests']))

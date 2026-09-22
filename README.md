@@ -37,6 +37,8 @@ SMS Backup & Restore XML (Telegram upload or Drive folder)
 | `/cancel` | Cancel pending manual category choices |
 | `/syncsms` | Import from the configured Drive folder |
 | `/edit [request]` | Find a purchase by amount/date and confirm description/category edits |
+| `/return [purchase]` | Choose a current-month expense, mark refund pending/received, or undo a return |
+| `/returns [page]` | List pending and received refunds across months; select one to update or undo |
 | `/breakdown Category` | Show confirmed purchases/services within a category |
 | `/smsentry ID` | Inspect a possible duplicate |
 | `/smscategory ID Category` | Correct a saved expense and learn your merchant choice |
@@ -63,9 +65,11 @@ The report shows the latest observed SMS-backup upload time. A failed SMS refres
 
 The editor sends purchase dates, amounts, descriptions and categories to the configured Groq model to identify the requested entry. It does not send the Bank Message column. Raw Input retains what you manually entered; Bank Message holds the original alert. Unknown descriptions/categories remain blank with Needs details status, never Other.
 
-Current/new monthly sheets have Date, Time, Amount, Description, Category, Payment Method, Raw Input, Bank Message, hidden Entry ID, Status, Treatment and Source. Each monthly tab contains its overview alongside the transactions in N:O: confirmed spending, pending amounts, possible duplicates, separate investments, a category selector in O2, and a doughnut chart. Selecting a category highlights the matching rows in the original transaction table. A compact chart sits below the overview totals; there is no second copy of the transaction list. All categories clears the highlight. Expand the column group G:L to see raw input, bank messages and entry metadata. These are live formulas. Only confirmed expenses enter spending totals; investments and amounts needing clarification remain visible separately.
+Current/new monthly sheets have Date, Time, Amount, Description, Category, Payment Method, Raw Input, Bank Message, hidden Entry ID, Status, Treatment and Source. Each monthly tab contains its overview alongside the transactions in N:O: spending after refunds, pending amounts, possible duplicates, separate investments, a category selector in O2, and a doughnut chart. Selecting a category highlights the matching rows in the original transaction table. A compact chart sits below the overview totals; there is no second copy of the transaction list. All categories clears the highlight. Expand the column group G:L to see raw input, bank messages and entry metadata. These are live formulas. Confirmed expenses and returns awaiting refunds enter spending totals; received refunds are excluded, while investments and amounts needing clarification remain visible separately.
 
 Near matches between manual and SMS entries (same day, within two rupees) are candidates, never proof. A confirmed merge retains the selected entry and links the original bank message. A durable merge record recovers interrupted writes. Exact matching SMS references remain idempotent.
+
+Returns retain the original purchase, amount, category and bank evidence. Use `/return` to choose a recent expense without AI, or `/return toy 600` to search with the configured model. `Return started — refund pending` leaves the expense in totals and shows it separately as awaiting money. `Full refund received` excludes it from its original purchase month's spending, category breakdown and chart. `Undo return — keep expense` restores it. Every change requires Apply; stale confirmations are rejected. `/returns` also finds returns from earlier months. This adjusts purchase-period spending, not cash flow on the refund date. Partial refunds and automatic matching of bank refund credits are not supported; confirm receipt in the bot. Editing a returned purchase's description or category preserves its return status, and later SMS matching still sees the retained record.
 
 The startup migration converts the current month and takes a SQLite snapshot before ledger changes. An optional private `TRAKOS_CLEANUP_PLAN` applies explicitly reviewed, identified corrections once; keep this plan out of source control. Back up the live workbook before migration. Older tabs retain their original schema until written to; reports can read both layouts.
 
