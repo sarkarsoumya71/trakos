@@ -12,7 +12,7 @@ import gspread
 import httpx
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard
 
-from expense_sheet import HEADERS, INVESTMENTS, EXCLUDED, RETURN_STATUSES, SPENDING_STATUSES, normalize_row, paise, sms_id, needs_review, ensure_dashboard
+from expense_sheet import HEADERS, INVESTMENTS, EXCLUDED, RETURN_STATUSES, SPENDING_STATUSES, normalize_row, paise, sms_id, needs_review, ensure_dashboard, matching_rows
 
 log = logging.getLogger('trakos.edit')
 
@@ -104,9 +104,9 @@ class ExpenseEditor:
                 ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
                 self.flow.db.set_sync_state('cleanup:' + plan['id'], '1')
             self.recover_merges()
-            if not self.flow.db.get_sync_state('returns-dashboard-v1:' + ws.title):
+            if not self.flow.db.get_sync_state('duplicate-status-v1:' + ws.title):
                 ensure_dashboard(sh, ws, self.bot.CATEGORY_LIST)
-                self.flow.db.set_sync_state('returns-dashboard-v1:' + ws.title, '1')
+                self.flow.db.set_sync_state('duplicate-status-v1:' + ws.title, '1')
 
     def cleanup_action(self, action):
         records = self.records(action['month'])
@@ -119,7 +119,7 @@ class ExpenseEditor:
                           and r['values'][3] == action['target_description']]
             if len(candidates) != 1:
                 raise ValueError('Cleanup merge target is ambiguous')
-            self.merge(duplicate, candidates[0], action.get('category'))
+            self.merge(duplicate, candidates[0], action.get('category'), action.get('bank_amount', False))
         else:
             candidates = [r for r in records if r['id'] == action.get('id')] if action.get('id') else [r for r in records
                 if r['values'][0] == action['date'] and paise(r['values'][2]) == action['amount_paise'] and r['values'][3] == action['description']]
@@ -149,7 +149,7 @@ class ExpenseEditor:
         if updates:
             self.bot.get_spreadsheet().worksheet(month).batch_update(updates, value_input_option='RAW')
 
-    def save(self, original, description, category, status=None):
+    def save(self, original, description, category, status=None, resolve_duplicate=False):
         if category and category not in self.bot.CATEGORY_LIST:
             raise ValueError('Choose a valid category')
         with self.bot.SHEET_LOCK:
@@ -157,6 +157,8 @@ class ExpenseEditor:
             if signature(current) != signature(original):
                 raise ValueError('This entry changed. Reopen it before applying another edit.')
             row = list(current['values'])
+            if row[9] == 'Possible duplicate' and not resolve_duplicate and status not in EXCLUDED:
+                raise ValueError('Resolve this possible duplicate with /duplicates before changing its category or counting it.')
             status = status or (row[9] if row[9] in RETURN_STATUSES else 'Confirmed')
             if status in RETURN_STATUSES:
                 self.validate_return(current)
@@ -179,7 +181,7 @@ class ExpenseEditor:
                 sh = self.bot.get_spreadsheet()
                 ensure_dashboard(sh, sh.worksheet(current['sheet']), self.bot.CATEGORY_LIST)
 
-    def merge(self, duplicate, target, category=None):
+    def merge(self, duplicate, target, category=None, bank_amount=False):
         """Link SMS evidence to the retained row and remove only the confirmed duplicate."""
         with self.bot.SHEET_LOCK:
             fresh = {r['id']: r for r in self.records(duplicate['sheet'])}
@@ -194,23 +196,44 @@ class ExpenseEditor:
                 raise ValueError('Keep the returned purchase as the retained entry so its refund status is preserved.')
             if right['values'][9] in RETURN_STATUSES and category in INVESTMENTS:
                 raise ValueError('A returned purchase cannot become an investment.')
+            merged_category = category or right['values'][4]
+            merged_status = right['values'][9]
+            if merged_status == 'Possible duplicate':
+                remaining = [r for r in self.duplicate_matches(right) if r['id'] != left['id']]
+                merged_status = 'Possible duplicate' if remaining else 'Confirmed' if merged_category else 'Needs details'
             tx = self.transaction(left['id'])
             job_key = 'merge_pending:' + left['id']
-            self.flow.db.set_sync_state(job_key, json.dumps({'source':left, 'target':right, 'category':category}))
+            self.flow.db.set_sync_state(job_key, json.dumps({'source':left, 'target':right, 'category':category, 'bank_amount':bank_amount}))
             if tx:
                 with self.flow.db.connect() as db:
                     db.execute("UPDATE transactions SET status='duplicate',reason=?,exported=1 WHERE id=? AND owner=?", ('Confirmed duplicate of '+right['id'], tx['id'], self.flow.owner))
+            retained_tx = self.transaction(right['id']) if right['id'].startswith('S') else None
+            if retained_tx and (category or merged_status != right['values'][9]):
+                db_status = {'Confirmed':'approved','Needs details':'review','Possible duplicate':'review','Return pending':'return_pending','Refunded':'refunded'}[merged_status]
+                self.flow.db.edit_details(retained_tx['id'],self.flow.owner,right['values'][3],merged_category or None,db_status)
+                if merged_status == 'Possible duplicate':
+                    with self.flow.db.connect() as db:
+                        db.execute("UPDATE transactions SET reason='Possible duplicate: more matches remain' WHERE id=? AND owner=?",(retained_tx['id'],self.flow.owner))
             ws = self.bot.get_spreadsheet().worksheet(left['sheet'])
             bank = '\n\n'.join(dict.fromkeys(s for s in (right['values'][7], left['values'][7]) if s))
+            raw = '\n\n'.join(dict.fromkeys(s for s in (right['values'][6], left['values'][6]) if s))
+            source_label = 'Manual + SMS' if bank and raw else 'SMS' if bank else 'Manual'
             requests = [{'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':7}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':bank}}]}], 'fields':'userEnteredValue'}},
-                        {'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':11}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':'Manual + SMS'}}]}], 'fields':'userEnteredValue'}}]
+                        {'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':6}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':raw}}]}], 'fields':'userEnteredValue'}},
+                        {'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':11}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':source_label}}]}], 'fields':'userEnteredValue'}}]
+            if bank_amount and tx and right['id'].startswith('M'):
+                requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':2}, 'rows':[{'values':[{'userEnteredValue':{'numberValue':tx['amount_paise']/100}}]}], 'fields':'userEnteredValue'}})
+            if right['values'][9] == 'Possible duplicate':
+                requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':9}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':merged_status}}]}], 'fields':'userEnteredValue'}})
             if category:
                 requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':4}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':category}}]}], 'fields':'userEnteredValue'}})
-                status = right['values'][9] if right['values'][9] in RETURN_STATUSES else 'Confirmed'
+                status = merged_status if merged_status in RETURN_STATUSES or merged_status=='Possible duplicate' else 'Confirmed'
                 requests.append({'updateCells': {'start': {'sheetId':ws.id,'rowIndex':right['row']-1,'columnIndex':9}, 'rows':[{'values':[{'userEnteredValue':{'stringValue':status}},{'userEnteredValue':{'stringValue':'Investment' if category in INVESTMENTS else 'Expense'}}]}], 'fields':'userEnteredValue'}})
             # Shift only transaction cells; the monthly overview occupies N:X.
             requests.append({'deleteRange': {'range': {'sheetId':ws.id,'startRowIndex':left['row']-1,'endRowIndex':left['row'], 'startColumnIndex':0,'endColumnIndex':12}, 'shiftDimension':'ROWS'}})
             ws.spreadsheet.batch_update({'requests':requests})
+            if retained_tx:
+                self.flow.db.mark_exported(retained_tx['id'],self.flow.owner)
             self.flow.db.set_sync_state(job_key, 'done')
 
     def recover_merges(self):
@@ -222,10 +245,66 @@ class ExpenseEditor:
             if not any(r['id'] == data['source']['id'] for r in rows):
                 self.flow.db.set_sync_state(job['key'], 'done')
                 continue
-            self.merge(data['source'], data['target'], data.get('category'))
+            self.merge(data['source'], data['target'], data.get('category'), data.get('bank_amount',False))
+
+    @staticmethod
+    def distinct_key(left, right):
+        return 'distinct_pair:' + ':'.join(sorted([left['id'], right['id']]))
+
+    def duplicate_matches(self, record):
+        records = self.records(record['sheet'])
+        ids = {row[8] for row in matching_rows(record['values'], [r['values'] for r in records])}
+        return [r for r in records if r['id'] in ids and not self.flow.db.get_sync_state(self.distinct_key(record,r))]
+
+    def separate(self, original, other=None):
+        with self.bot.SHEET_LOCK:
+            current = self.find(original['id'])
+            if signature(current) != signature(original) or (other and signature(self.find(other['id'])) != signature(other)):
+                raise ValueError('A purchase changed. Reopen /duplicates before deciding.')
+            if other:
+                self.flow.db.set_sync_state(self.distinct_key(current,other),'1')
+            if not self.duplicate_matches(current) and current['values'][9] == 'Possible duplicate':
+                self.save(current,current['values'][3],current['values'][4],resolve_duplicate=True)
+            if other and other['values'][9] == 'Possible duplicate' and not self.duplicate_matches(other):
+                self.save(other,other['values'][3],other['values'][4],resolve_duplicate=True)
+
+    async def duplicate_card(self, message, context, record):
+        matches = await asyncio.to_thread(self.duplicate_matches,record)
+        other = matches[0] if matches else None
+        token = secrets.token_hex(4)
+        context.user_data.setdefault('duplicate_choices',{})[token] = {'record':record,'other':other}
+        # Bound old UI snapshots while allowing several expenses from one message.
+        choices = context.user_data['duplicate_choices']
+        while len(choices) > 30:
+            del choices[next(iter(choices))]
+        text = 'Possible duplicate — held outside totals\n\n'+preview(record)+'\nSource: '+record['values'][11]
+        if other:
+            text += '\n\nMay match:\n'+preview(other)+'\nSource: '+other['values'][11]+' · '+other['values'][9]
+            text += '\n\nSame purchase keeps one row with your details and bank evidence. For a manual/SMS match, it uses the exact bank amount. Separate purchases keeps both records.'
+            if len(matches)>1:
+                text += f'\n{len(matches)} possible matches; resolve each before this entry is counted.'
+            buttons = [[Button('Same purchase',callback_data='ex:same:'+token),Button('Separate purchases',callback_data='ex:distinct:'+token)]]
+        else:
+            text += '\n\nNo unresolved matching row remains. Confirm this is a separate purchase to release it for categorization/counting.'
+            buttons = [[Button('Separate purchase',callback_data='ex:distinct:'+token)]]
+        await message.reply_text(text,reply_markup=Keyboard(buttons))
+
+    async def duplicates(self, update, context):
+        if not self.flow.allowed(update):
+            return
+        month=datetime.now(self.bot.TIMEZONE).strftime('%B %Y')
+        rows=await asyncio.to_thread(self.records,month)
+        pending=[r for r in rows if r['values'][9]=='Possible duplicate']
+        if not pending:
+            await update.message.reply_text('No unresolved duplicate purchases this month.')
+            return
+        await self.duplicate_card(update.message,context,pending[0])
 
     def keyboard(self, record):
         identity = record['id']
+        if record['values'][9] == 'Possible duplicate':
+            return Keyboard([[Button('Compare possible duplicate',callback_data=f'ex:duplicates:{identity}')],
+                             [Button('Next unclear purchase',callback_data=f'ex:next:{identity}')]])
         buttons = [[Button('Describe this purchase', callback_data=f'ex:describe:{identity}')]]
         if record['values'][7]:
             buttons.append([Button('View bank message', callback_data=f'ex:bank:{identity}')])
@@ -322,6 +401,9 @@ class ExpenseEditor:
         record = pending[index]
         context.user_data['review_cursor'] = record['id']
         context.user_data['expense_edit'] = record
+        if record['values'][9] == 'Possible duplicate':
+            await self.duplicate_card(update.message, context, record)
+            return
         await update.message.reply_text(f'{len(pending)} purchase(s) need details.\n\n'+preview(record)+'\n\nReply with what this was for, or choose a category below.', reply_markup=self.keyboard(record))
 
     async def edit(self, update, context):
@@ -390,6 +472,9 @@ class ExpenseEditor:
 
     async def propose(self, message, context, record, changes):
         row=record['values']
+        if row[9] == 'Possible duplicate' and changes.get('status') not in EXCLUDED:
+            await self.duplicate_card(message, context, record)
+            return
         description = changes.get('description') or row[3]
         category = changes.get('category') or row[4]
         token=secrets.token_hex(4)
@@ -438,6 +523,35 @@ class ExpenseEditor:
         parts=query.data.split(':')
         action, identity=parts[1:3]
         try:
+            if action in ('same','distinct'):
+                choice=context.user_data.get('duplicate_choices',{}).get(identity)
+                if not choice:
+                    raise ValueError('This choice expired. Reopen /duplicates.')
+                original,other=choice['record'],choice['other']
+                async with self.flow.lock:
+                    if action=='same':
+                        if not other:
+                            raise ValueError('No matching purchase selected. Reopen /duplicates.')
+                        # Retain the manual description/category even when SMS arrived first.
+                        source,target=(other,original) if original['id'].startswith('M') and other['id'].startswith('S') else (original,other)
+                        await asyncio.to_thread(self.merge,source,target,None,True)
+                    else:
+                        await asyncio.to_thread(self.separate,original,other)
+                context.user_data['duplicate_choices'].pop(identity,None)
+                context.user_data.pop('expense_edit',None)
+                await query.edit_message_text('Linked as one purchase. Sheet and totals updated.' if action=='same' else 'Kept as separate purchases. Checking any remaining matches.')
+                if action=='distinct':
+                    current=await asyncio.to_thread(self.find,original['id'])
+                    if current['values'][9]=='Possible duplicate':
+                        await self.duplicate_card(query.message,context,current)
+                    elif needs_review(current['values']):
+                        context.user_data['expense_edit']=current
+                        await query.message.reply_text('This purchase still needs details.\n'+preview(current),reply_markup=self.keyboard(current))
+                else:
+                    current=await asyncio.to_thread(self.find,target['id'])
+                    if current['values'][9]=='Possible duplicate':
+                        await self.duplicate_card(query.message,context,current)
+                return
             if action=='cancel':
                 proposal=context.user_data.get('expense_proposal')
                 if proposal and proposal['token']==identity:
@@ -461,6 +575,9 @@ class ExpenseEditor:
                 await query.edit_message_text('Saved. Your sheet and spending totals are updated. /review shows the next unclear purchase.')
                 return
             record=await asyncio.to_thread(self.find,identity)
+            if record['values'][9]=='Possible duplicate' and action not in ('bank','next','exclude'):
+                await self.duplicate_card(query.message,context,record)
+                return
             if action == 'return':
                 await self.return_card(query.message, record)
                 return

@@ -87,7 +87,8 @@ def plan(transactions, pending, monthly_rows):
             opposite = [other for other in transactions if tx['reference'] and other['reference'] == tx['reference']
                 and other['direction'] != tx['direction'] and same_day_amount(other) == same_day_amount(tx)
                 and other['account'] and tx['account'] and (other['bank'], other['account']) != (tx['bank'], tx['account'])]
-            matches = [r for r in sheet[same_day_amount(tx)] if r.get('sms_id') != tx['id'] and not (
+            matches = [r for r in sheet[same_day_amount(tx)] if r.get('sms_id') != tx['id']
+                and (not r.get('payment') or not tx.get('payment') or r['payment'] == tx['payment']) and not (
                 r.get('sms_id') in by_id and tx['reference'] and by_id[r['sms_id']]['reference']
                 and tx['reference'] != by_id[r['sms_id']]['reference'])]
             strong = [r for r in matches if (tx['reference'] and re.search(r'(?<!\w)' + re.escape(tx['reference']) + r'(?!\w)', r['raw'], re.I))

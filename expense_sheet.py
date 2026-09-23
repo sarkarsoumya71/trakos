@@ -65,7 +65,16 @@ def near_manual_matches(tx, records):
     """Rounded manual values are candidates, never proof of duplication."""
     return [r for r in records if r['date'] == tx['occurred_at'][:10]
             and r.get('sms_id') is None and r.get('status') not in EXCLUDED
+            and (not r.get('payment') or not tx.get('payment') or r['payment'] == tx['payment'])
             and abs(r['amount_paise'] - tx['amount_paise']) <= 200]
+
+
+def matching_rows(row, rows):
+    """Candidates only: same date, compatible payment, within two rupees."""
+    return [other for other in rows if len(other) >= 12 and other[0] == row[0]
+            and other[8] != row[8] and other[9] not in EXCLUDED
+            and (not row[5] or not other[5] or row[5] == other[5])
+            and abs(paise(other[2]) - paise(row[2])) <= 200]
 
 
 def ensure_layout(ws, categories):
@@ -172,11 +181,18 @@ def ensure_dashboard(sh, ws, categories):
         requests.append({'updateDimensionProperties': {'range':{'sheetId':ws.id,'dimension':'COLUMNS','startIndex':start,'endIndex':end},'properties':{'pixelSize':width},'fields':'pixelSize'}})
     for col, start_row in [(14,4)]:
         requests.append({'repeatCell':{'range':{'sheetId':ws.id,'startRowIndex':start_row,'startColumnIndex':col,'endColumnIndex':col+1},'cell':{'userEnteredFormat':{'numberFormat':{'type':'NUMBER','pattern':'"\u20b9"#,##0.00'}}},'fields':'userEnteredFormat.numberFormat'}})
-    group_range = {'sheetId':ws.id,'dimension':'COLUMNS','startIndex':6,'endIndex':12}
-    if not any(g['range'].get('startIndex')==6 and g['range'].get('endIndex')==12 for g in current.get('columnGroups',[])):
-        requests += [{'addDimensionGroup':{'range':group_range}},
-            {'updateDimensionGroup':{'dimensionGroup':{'range':group_range,'depth':1,'collapsed':True},'fields':'collapsed'}},
-            {'updateDimensionProperties':{'range':group_range,'properties':{'hiddenByUser':True},'fields':'hiddenByUser'}}]
+    # Keep Status (J) visible beside Payment; collapse evidence and internal metadata.
+    groups=current.get('columnGroups',[])
+    for g in groups:
+        if g['range'].get('startIndex')==6 and g['range'].get('endIndex')==12:
+            requests.append({'deleteDimensionGroup':{'range':{'sheetId':ws.id,'dimension':'COLUMNS','startIndex':6,'endIndex':12}}})
+    for start,end in [(6,9),(10,12)]:
+        group_range={'sheetId':ws.id,'dimension':'COLUMNS','startIndex':start,'endIndex':end}
+        if not any(g['range'].get('startIndex')==start and g['range'].get('endIndex')==end for g in groups):
+            requests += [{'addDimensionGroup':{'range':group_range}},
+                {'updateDimensionGroup':{'dimensionGroup':{'range':group_range,'depth':1,'collapsed':True},'fields':'collapsed'}},
+                {'updateDimensionProperties':{'range':group_range,'properties':{'hiddenByUser':True},'fields':'hiddenByUser'}}]
+    requests.append({'updateDimensionProperties':{'range':{'sheetId':ws.id,'dimension':'COLUMNS','startIndex':9,'endIndex':10},'properties':{'hiddenByUser':False,'pixelSize':165},'fields':'hiddenByUser,pixelSize'}})
     rule = {'ranges':[{'sheetId':ws.id,'startRowIndex':1,'startColumnIndex':0,'endColumnIndex':12}],
         'booleanRule':{'condition':{'type':'CUSTOM_FORMULA','values':[{'userEnteredValue':HIGHLIGHT_FORMULA}]},
         'format':{'backgroundColor':{'red':.83,'green':.93,'blue':1},'textFormat':{'bold':True}}}}
@@ -185,6 +201,12 @@ def ensure_dashboard(sh, ws, categories):
         requests.append({'addConditionalFormatRule':{'rule':rule,'index':0}})
     else:
         requests.append({'updateConditionalFormatRule':{'sheetId':ws.id,'index':old_rule,'rule':rule}})
+    duplicate_formula='=$J2="Possible duplicate"'
+    duplicate_rule={'ranges':[{'sheetId':ws.id,'startRowIndex':1,'startColumnIndex':9,'endColumnIndex':10}],
+        'booleanRule':{'condition':{'type':'CUSTOM_FORMULA','values':[{'userEnteredValue':duplicate_formula}]},
+        'format':{'backgroundColor':{'red':1,'green':.9,'blue':.65},'textFormat':{'bold':True}}}}
+    if not any(r.get('booleanRule',{}).get('condition',{}).get('values')==[{'userEnteredValue':duplicate_formula}] for r in current.get('conditionalFormats',[])):
+        requests.append({'addConditionalFormatRule':{'rule':duplicate_rule,'index':0}})
     title = ws.title + ' - spending after refunds'
     chart = next((c for c in current.get('charts',[]) if c.get('spec',{}).get('title') in (title, ws.title + ' - confirmed spending')),None)
     spec = {'title':title,'subtitle':'Refunds received excluded; pending refunds still included','fontName':'Arial',
