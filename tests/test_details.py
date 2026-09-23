@@ -36,14 +36,16 @@ class LayoutTests(unittest.TestCase):
         sh.fetch_sheet_metadata.return_value={'sheets':[{'properties':{'sheetId':123},
             'charts':[{'chartId':9,'spec':{'title':'September 2026 - confirmed spending'}}],
             'conditionalFormats':[{'booleanRule':{'condition':{'values':[{'userEnteredValue':HIGHLIGHT_FORMULA}]}}}],
-            'columnGroups':[{'range':{'startIndex':6,'endIndex':12}}]}]}
+            'columnGroups':[{'range':{'startIndex':6,'endIndex':9}},{'range':{'startIndex':10,'endIndex':12}}]}]}
         ensure_dashboard(sh,ws,bot.CATEGORY_LIST)
         sh.add_worksheet.assert_not_called()
         sh.worksheet.assert_not_called()
         self.assertEqual(ws.update.call_args_list[0].kwargs['values'][1][1],'Business')
         self.assertTrue(all(c.kwargs['range_name'].startswith('N') for c in ws.update.call_args_list))
         requests=sh.batch_update.call_args.args[0]['requests']
-        self.assertFalse(any('addChart' in r or 'addDimensionGroup' in r or 'addConditionalFormatRule' in r for r in requests))
+        self.assertFalse(any('addChart' in r or 'addDimensionGroup' in r for r in requests))
+        visible_status=next(r['updateDimensionProperties'] for r in requests if r.get('updateDimensionProperties',{}).get('range',{}).get('startIndex')==9)
+        self.assertFalse(visible_status['properties']['hiddenByUser'])
         highlight=next(r['updateConditionalFormatRule']['rule'] for r in requests if 'updateConditionalFormatRule' in r)
         self.assertEqual(highlight['ranges'][0]['sheetId'],ws.id)
         self.assertIn('$E2=$O$2',highlight['booleanRule']['condition']['values'][0]['userEnteredValue'])

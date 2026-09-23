@@ -34,6 +34,7 @@ COMMAND_MENU = [
     ('return', 'Find a purchase to return, refund or restore'),
     ('returns', 'Track pending and received refunds'),
     ('review', 'Add descriptions and categories to unclear purchases'),
+    ('duplicates', 'Compare and link possible duplicate purchases'),
     ('breakdown', 'List purchases in a category: /breakdown Subscriptions'),
     ('others', 'Show purchases that still need details'),
     ('syncsms', 'Import the latest uploaded SMS backup'),
@@ -141,6 +142,16 @@ class SMSWorkflow:
                     status = 'Needs details'
                 row = normalize_row([stamp.strftime('%d/%m/%Y'), stamp.strftime('%H:%M'), tx['amount_paise'] / 100,
                     description, category, tx['payment'], '', self.db.body(tx['id'], owner), entry_id, status, '', 'SMS'])
+                # A manual entry may arrive after automatic categorization read the sheet.
+                # Recheck fresh rows under SHEET_LOCK before first projection.
+                if not existing_month and tx['status'] in ('approved','review'):
+                    from expense_sheet import matching_rows
+                    candidates = matching_rows(row, [r for r in saved_rows if len(r)>11 and r[8].startswith('M')])
+                    if candidates:
+                        row[9] = 'Possible duplicate'
+                        with self.db.connect() as db:
+                            db.execute("UPDATE transactions SET status='review',reason='Possible duplicate: matching manual purchase' WHERE id=? AND owner=?", (tx['id'],owner))
+                        tx['status'],tx['reason']='review','Possible duplicate: matching manual purchase'
                 if existing_month:
                     row[0] = (stamp.replace(tzinfo=None, hour=0,minute=0,second=0,microsecond=0) - datetime(1899,12,30)).days
                     updates.append({'range':f'A{existing_month[0]}:L{existing_month[0]}','values':[row]})
@@ -206,7 +217,7 @@ class SMSWorkflow:
                         continue
                     records.append({'date': stamp.strftime('%Y-%m-%d'), 'amount_paise': int(amount),
                         'description': row[3], 'category': row[4], 'raw': raw + ('\n' + row[7] if len(row)>7 else ''),
-                        'sms_id': markers.get(identity), 'status':row[9] if len(row)>9 else ''})
+                        'sms_id': markers.get(identity), 'status':row[9] if len(row)>9 else '', 'payment':row[5] if len(row)>5 else ''})
         return records
 
     async def complete_sync(self, owner, telegram):
@@ -404,6 +415,11 @@ class SMSWorkflow:
                 category = self.bot.CATEGORY_LIST[category_index]
                 action = 'expense'
             async with self.lock:
+                if action == 'expense':
+                    tx = self.db.get(tx_id, update.effective_user.id)
+                    if tx and 'duplicate' in tx['reason'].lower():
+                        await query.edit_message_text('Resolve this possible duplicate with /duplicates first. Choosing a category cannot count it twice.')
+                        return
                 changed = await asyncio.to_thread(self.db.resolve, tx_id, update.effective_user.id, action, category)
                 if not changed:
                     await query.edit_message_text('This entry was already reviewed. Use /retrysms if its Sheet sync failed.')
@@ -479,7 +495,9 @@ class SMSWorkflow:
                     self.editor.save(record, record['values'][3], category)
                 await asyncio.to_thread(change)
             await update.message.reply_text(f'SMS #{tx_id}: category changed to {category}. Future expenses at this merchant will use it.')
-        except (ValueError, IndexError, StopIteration):
+        except ValueError as exc:
+            await update.message.reply_text(str(exc) if 'duplicate' in str(exc) else 'Use /smscategory ID Category for a saved expense. See /categories.')
+        except (IndexError, StopIteration):
             await update.message.reply_text('Use /smscategory ID Category for a saved expense, for example /smscategory 12 Food. See /categories.')
         except Exception as exc:
             log.warning('Category correction failed (%s)', type(exc).__name__)
@@ -659,6 +677,7 @@ class SMSWorkflow:
         app.add_handler(CommandHandler('smscategory', self.change_category))
         app.add_handler(CommandHandler('others', self.editor.review))
         app.add_handler(CommandHandler('edit', self.editor.edit))
+        app.add_handler(CommandHandler('duplicates', self.editor.duplicates))
         app.add_handler(CommandHandler('return', self.editor.return_purchase))
         app.add_handler(CommandHandler('returns', self.editor.returns))
         app.add_handler(CommandHandler('breakdown', self.editor.breakdown))

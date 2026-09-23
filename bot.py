@@ -117,6 +117,12 @@ def append_to_data_area(ws, row_data):
     next_row = len(col_a) + 1
     cell_range = f"A{next_row}:L{next_row}"
     row_data = normalize_row(row_data)
+    if row_data[11] == 'Manual':
+        from expense_sheet import matching_rows
+        existing = ws.get(f'A2:L{ws.row_count}')
+        if matching_rows(row_data, existing):
+            row_data[9] = 'Possible duplicate'
+    result = {'id': row_data[8], 'status': row_data[9]}
     date = datetime.strptime(row_data[0], "%d/%m/%Y")
     row_data[0] = (date - datetime(1899, 12, 30)).days
     if next_row > ws.row_count:
@@ -136,6 +142,7 @@ def append_to_data_area(ws, row_data):
         except Exception as exc:
             # A successful append must not be reported as failed if sorting fails.
             log.warning("Expense saved; sorting deferred (%s)", type(exc).__name__)
+    return result
 
 
 @sheet_locked
@@ -613,7 +620,7 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
     try:
         sh = get_spreadsheet()
         ws = get_month_sheet(sh, entry_date)
-        append_to_data_area(ws, row)
+        saved = append_to_data_area(ws, row)
     except Exception as e:
         log.error("Sheet write error (%s)", type(e).__name__)
         await query.edit_message_text("Failed to write to sheet. Try again.")
@@ -624,10 +631,14 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
     date_str = f" · {entry_date.strftime('%d %b')}" if pending.get("date") else ""
 
     await query.edit_message_text(
+        ('Held outside totals — possible duplicate\n' if saved and saved['status']=='Possible duplicate' else '')+
         f"✓ *{format_inr(pending['amount'])}* — {escape_markdown(pending['description'])}\n"
         f"  {pending['category']} · {pending.get('payment', 'UPI')}{date_str}",
         parse_mode="Markdown",
     )
+    if saved and saved['status'] == 'Possible duplicate' and SMS_WORKFLOW:
+        record = await asyncio.to_thread(SMS_WORKFLOW.editor.find, saved['id'])
+        await SMS_WORKFLOW.editor.duplicate_card(query.message, context, record)
 
     # Check if there are more entries in the queue
     queue = context.user_data.get("pending_queue", [])
@@ -693,6 +704,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/check — refresh Drive, then show today, week and month\n"
         "/review - add missing purchase details\n"
         "/edit - describe a correction\n"
+        "/duplicates - compare repeated purchases\n"
         "/return - return or refund a purchase\n"
         "/returns - track refunds or undo a return\n"
         "/breakdown Subscriptions - see purchases by category\n"
@@ -884,7 +896,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             sh = get_spreadsheet()
             ws = get_month_sheet(sh, entry_date)
-            append_to_data_area(ws, row)
+            saved = append_to_data_area(ws, row)
+
+            if saved and saved['status'] == 'Possible duplicate' and SMS_WORKFLOW:
+                logged_lines.append(f"Held outside totals: {format_inr(entry['amount'])} — possible duplicate.")
+                record = await asyncio.to_thread(SMS_WORKFLOW.editor.find, saved['id'])
+                await SMS_WORKFLOW.editor.duplicate_card(update.message, context, record)
+                continue
 
             date_str = f" · {entry_date.strftime('%d %b')}" if entry.get("date") else ""
             logged_lines.append(
@@ -935,6 +953,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("pending_entry", None)
     context.user_data.pop("pending_queue", None)
     context.user_data.pop("expense_edit", None)
+    context.user_data.pop("duplicate_choices", None)
     context.user_data.pop("edit_suggestion", None)
     context.user_data.pop("expense_proposal", None)
     await update.message.reply_text("Pending manual entries cancelled. Already saved expenses are unchanged.")
